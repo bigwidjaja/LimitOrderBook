@@ -39,11 +39,11 @@ cancel
 */
 
 bool Orderbook::cancel(OrderId id) {
-    if (index_.contains(id)) == false { 
+    if (index_.contains(id) == false) {
         return false;
-    }  
+    }
 
-    Level::iterator node = index[id]; // node is the bookmark (our id)
+    Level::iterator node = index_[id]; // node is the bookmark (our id)
     Price price = node->price; 
     Side side = node->side;  
 
