@@ -21,7 +21,7 @@ public:
 private:
     using Level = std::list<Order>;
 
-    std::map<Price, Level, std::greater<Price>> bids_;
+    std::map<Price, Level, std::greater<Price>> bids_; // syntax for map: <key, value, sort order> 
     std::map<Price, Level, std::less<Price>> asks_;
-    std::unordered_map<OrderId, Level::iterator> index_;
-};
+    std::unordered_map<OrderId, Level::iterator> index_; // Level::iterator is a bookmark into either asks or bids
+}; // unordered map is a hashtable lol

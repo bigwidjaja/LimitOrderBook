@@ -71,19 +71,26 @@ bool Orderbook::cancel(OrderId id) {
     Empty side: std::nullopt. Otherwise the first key in that map.
 */
 
-std::optional<Price> Orderbook::bestBid() const {
-    return std::nullopt;
+std::optional<Price> Orderbook::bestBid() const { 
+    if (bids_.empty()) { 
+        return std::nullopt;
+    } else { 
+        return bids_.begin()->first; 
+    }
 }
 
 std::optional<Price> Orderbook::bestAsk() const {
-    return std::nullopt;
+    if (asks_.empty()) {
+        return std::nullopt; 
+    } else {
+        return asks_.begin()->first; // asks_.begin returns the first entry which is 101 -> [sell order ...] so ->first returns that 101 (the first item)
+    }
 }
 
 /* 
-  size
-    index_.size().
+  this one self explanatory lol
 */
 
 std::size_t Orderbook::size() const {
-    return 0;
+    return index_.size();
 }
