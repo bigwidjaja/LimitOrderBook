@@ -1,0 +1,296 @@
+================================================================================
+  LESSON 16 — BUILD ROADMAP, MILESTONES, AND CAPSTONE
+  Part 4: Systems and Your Own Project  |  ongoing  |  Prereqs: 01-15
+================================================================================
+
+HOW TO USE THIS FILE
+--------------------
+Build your own order-book system milestone by milestone. Each milestone
+lists what to build, which lessons it uses, and "done when" criteria. Don't
+move on until every box is ticked. Commit to git after every milestone.
+
+  Milestone 0   Setup and warm-up on this repo       lessons 01-08
+  Milestone 1   Core order book library + tests      lessons 02-10, 14
+  Milestone 2   More features                        lessons 09, 10, 12
+  Milestone 3   Benchmark and optimize               lessons 05-07, 13
+  Milestone 4   Python bindings + web API            lesson 15 (Option A)
+  Milestone 5   Concurrency: one thread per symbol   lesson 11
+  Milestone 6   Stretch: binary protocol, persistence lessons 11, 15 (Option C)
+  Capstone      Put it together and write it up
+
+If you are targeting SIG Market Data / Libraries & Tools, stop using
+these matching-engine milestones after M0 and switch to the mdkit
+plan in 17_mdkit_project_design.txt section 12.
+
+
+================================================================================
+MILESTONE 0 — SETUP AND WARM-UP ON THIS REPO
+================================================================================
+
+Build:
+  - A modern compiler and CMake (lesson 01)
+  - Build the repo's Server.cpp with -Wall -Wextra and run it by hand
+  - Apply these fixes to a COPY of Server.cpp (a branch is fine):
+      [ ] CancelOrder use-after-free (lesson 08)
+      [ ] modify (MatchOrder) use-after-free (lesson 08)
+      [ ] std::next -> std::prev(orders.end()) (lesson 07)
+      [ ] initializer-list order warning (lesson 03)
+      [ ] server_cancel creating books through operator[] (lesson 06)
+
+Done when:
+  [ ] The cancel_test harness from lesson 08 is clean under
+      -fsanitize=address,undefined
+  [ ] -Wall -Wextra gives no warnings from Server.cpp itself
+  [ ] You can explain each fix out loud without notes
+
+
+================================================================================
+MILESTONE 1 — CORE ORDER BOOK LIBRARY + TESTS
+================================================================================
+
+Build (in a NEW repo, using lesson 14's layout):
+  - types.hpp, order.hpp, orderbook.hpp, orderbook.cpp
+  - Operations: add (GTC and FAK), cancel, bestBid, bestAsk, size
+  - Price-time priority; trades execute at the resting price
+  - A Catch2 test for every item on lesson 14's "what to test" list
+  - CMake with the sanitizer option ON by default
+
+Rules:
+  - No shared_ptr (the book owns its orders)
+  - No I/O, no globals, no "using namespace std"
+  - Write the tests FIRST, then the code
+
+Done when:
+  [ ] ctest passes, with sanitizers on
+  [ ] Zero warnings at -Wall -Wextra -Wpedantic
+  [ ] You've compared your code with 14b_reference_solution.txt and
+      written down every difference, and which version you prefer and why
+
+
+================================================================================
+MILESTONE 2 — MORE FEATURES
+================================================================================
+
+Pick at least three:
+  [ ] AddResult { Status status; std::vector<Trade> trades; } with
+      enum class Status { Accepted, Rejected, ... }  (lessons 02, 10)
+  [ ] modify(id, newPrice, newQty): keep time priority if ONLY the quantity
+      goes down; otherwise cancel + re-add
+  [ ] Market orders (match at any price, never rest)
+  [ ] levels(depth) -> std::vector<LevelInfo> snapshot (price, total qty)
+  [ ] "Strong types": struct Price { std::int32_t ticks; }; with operator<=>,
+      so the compiler rejects mixing a Price and a Quantity  (lesson 12)
+  [ ] Order-book events as std::variant<Accepted, Traded, Cancelled>,
+      delivered to a callback  (lesson 12)
+
+Done when:
+  [ ] Every new feature has tests, including edge cases
+  [ ] No existing test was weakened to make a new feature pass
+
+
+================================================================================
+MILESTONE 3 — BENCHMARK AND OPTIMIZE
+================================================================================
+
+Measure first. A tested, no-library harness (the lesson 14b book does ~8
+million orders/sec at -O2 on this Mac):
+
+    #include "orderbook/orderbook.hpp"
+    #include <chrono>
+    #include <iostream>
+    #include <random>
+
+    int main() {
+        std::mt19937 rng(42);
+        std::uniform_int_distribution<int> price(90, 110), qty(1, 100), side(0, 1);
+        constexpr int N = 2'000'000;
+        std::vector<Order> orders;
+        orders.reserve(N);
+        for (int i = 0; i < N; ++i)
+            orders.push_back({static_cast<OrderId>(i + 1),
+                              side(rng) ? Side::Buy : Side::Sell,
+                              OrderType::GoodTillCancel, price(rng),
+                              static_cast<Quantity>(qty(rng))});
+
+        Orderbook book;
+        std::size_t trades = 0;
+        auto start = std::chrono::steady_clock::now();
+        for (const auto& o : orders) trades += book.add(o).size();
+        auto secs = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count();
+        std::cout << N << " orders, " << trades << " trades, "
+                  << static_cast<long>(N / secs) << " orders/sec\n";
+    }
+
+  Build it in RELEASE mode (-O2, no sanitizers). Sanitizer builds are
+  2-3x slower and not representative.
+
+  Note that the orders are generated BEFORE the timer starts, so the timing
+  measures only the order book.
+
+Then use Google Benchmark for repeatable, statistically sound numbers.
+(Standard usage, not compiled here because the library isn't installed.)
+
+    # CMakeLists.txt
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(benchmark
+      GIT_REPOSITORY https://github.com/google/benchmark.git
+      GIT_TAG        v1.9.0)
+    FetchContent_MakeAvailable(benchmark)
+    add_executable(orderbook_bench bench/orderbook_bench.cpp)
+    target_link_libraries(orderbook_bench PRIVATE orderbook_core benchmark::benchmark_main)
+
+    // bench/orderbook_bench.cpp
+    #include <benchmark/benchmark.h>
+    #include "orderbook/orderbook.hpp"
+
+    static void BM_RestingOrders(benchmark::State& state) {
+        Orderbook book;
+        OrderId id = 0;
+        for (auto _ : state) {
+            auto trades = book.add({++id, Side::Buy, OrderType::GoodTillCancel,
+                                    static_cast<Price>(id % 100), 10});
+            benchmark::DoNotOptimize(trades);
+        }
+        state.SetItemsProcessed(state.iterations());
+    }
+    BENCHMARK(BM_RestingOrders);
+
+  DoNotOptimize stops the compiler from deleting work whose result is
+  unused (it's allowed to, and it will).
+
+Optimization ideas, in the order you should try them:
+  1. Run a profiler first to find where time goes. On macOS: Instruments
+     (Time Profiler), or "xcrun xctrace". Don't guess.
+  2. Avoid allocating a std::vector<Trade> for every add. Pass in a
+     reusable output vector, or use a callback.
+  3. Reserve the index_ hash map up front (index_.reserve(n)).
+  4. Replace std::list's one-allocation-per-order with a pool or free list.
+  5. If prices live in a small, known range: replace std::map with a
+     vector indexed by price tick, plus a tracked best price.
+
+Done when:
+  [ ] You have a before/after table in your README for each optimization
+  [ ] Every optimization kept all tests green
+  [ ] You can explain why each one helped (or didn't)
+
+
+================================================================================
+MILESTONE 4 — PYTHON BINDINGS + WEB API
+================================================================================
+
+Build (lesson 15, Option A):
+  - A pybind11 module with CMake + scikit-build-core, installed with
+    "pip install ."
+  - The FastAPI app from lesson 15, extended with /order/cancel and
+    /order/status
+  - An add_many binding so the simulation loop runs in C++ (lesson 15,
+    exercise 2)
+  - Optionally: repoint this repo's Next.js frontend at your API
+
+Done when:
+  [ ] pytest tests for the Python API pass (yes, you get to use pytest!)
+  [ ] A simulation of 1,000,000 orders works, and you've recorded the time
+      with the Python loop vs add_many
+  [ ] You can explain what the GIL does during a C++ call, and what the
+      lock in the FastAPI app protects
+
+
+================================================================================
+MILESTONE 5 — CONCURRENCY: ONE THREAD PER SYMBOL
+================================================================================
+
+Build (lesson 11, "Design B"):
+  - An Engine class that owns one Orderbook and one worker std::thread
+  - Messages (a std::variant of NewOrder / Cancel) arrive through the
+    BlockingQueue from lesson 11
+  - Results are returned through a callback or a second queue
+  - An EngineManager: symbol -> Engine, created on first use
+  - Clean shutdown: close the queues, then join the threads
+
+Done when:
+  [ ] A stress test with 8 producer threads and 4 symbols runs clean under
+      -fsanitize=thread
+  [ ] The Orderbook class itself still has no mutex
+  [ ] Throughput scales when you add symbols (measure it)
+
+
+================================================================================
+MILESTONE 6 — STRETCH GOALS (pick any)
+================================================================================
+
+  [ ] Binary TCP protocol with Asio (lesson 15, Option C), plus a C++ load
+      generator client that reports orders/sec and latency percentiles
+      (p50/p99)
+  [ ] Event log: append every accepted message to a file, and rebuild the
+      book by replaying it after a crash (the "event sourcing" pattern
+      real exchanges use)
+  [ ] Market-data feed: publish best bid/ask changes to subscribers
+  [ ] A process supervisor that RESTARTS crashed engines and replays their
+      event logs
+  [ ] Rewrite the order book in Rust and compare the code and the speed
+
+
+================================================================================
+CAPSTONE
+================================================================================
+
+Your final project should have:
+  [ ] A C++20 order book library with a clean header/source split
+  [ ] Unit tests (Catch2) running under ASan + UBSan in CI (GitHub Actions)
+  [ ] Benchmarks with recorded numbers
+  [ ] Python bindings and a web API (or the pure C++ server)
+  [ ] One concurrency design, verified with TSan
+  [ ] A README covering: architecture diagram, design decisions and why,
+      benchmark results, and what you'd do next
+
+A strong README section: "Differences from TradingEngine, and why". It
+shows you understood this repo's weaknesses, not just its features.
+
+
+================================================================================
+NOT INTO ORDER BOOKS? SAME SKILLS, DIFFERENT PROJECT
+================================================================================
+
+Each of these exercises the same C++ concepts (containers, ownership,
+iterators, concurrency, a clean core library + thin I/O layer):
+
+  Redis-lite key-value server
+      unordered_map + TTL expiry (a priority_queue), a TCP text protocol,
+      snapshot to disk. Concepts: containers, sockets, RAII file handles.
+
+  LRU cache library + Python binding
+      list + unordered_map<Key, list::iterator>: the SAME iterator trick as
+      the order book's cancel. Concepts: iterator stability, templates
+      (make it LRUCache<K, V>).
+
+  Rate limiter service (token bucket per client)
+      Concepts: std::chrono, atomics, a sharded map with one mutex per shard.
+
+  Tiny ray tracer
+      Concepts: value types, operator overloading, performance, threads
+      (render rows in parallel). Visual results are motivating.
+
+  Log-file analyzer
+      Concepts: std::string_view, parsing, memory-mapped files, parallel
+      algorithms (std::execution::par, if your standard library supports it).
+
+
+================================================================================
+FINAL SELF-ASSESSMENT
+================================================================================
+
+You're done with this course when you can do all of these without notes:
+
+  [ ] Explain the compile -> link pipeline and diagnose a link error
+  [ ] Choose between T, const T&, T&, T*, unique_ptr<T>, shared_ptr<T>
+  [ ] Explain move semantics and the rule of zero
+  [ ] Pick a container by its complexity AND invalidation rules
+  [ ] Spot a dangling reference in code review (like lesson 08's CancelOrder)
+  [ ] Explain RAII and why C++ has no finally
+  [ ] Explain why a data race can print the "right" answer and still be a bug
+  [ ] Set up a CMake project with tests, sanitizers, and a dependency
+  [ ] Expose a C++ class to Python
+  [ ] Explain why this repo's architecture, not its C++, limits its speed
+
+Back to the index: 00_START_HERE.txt

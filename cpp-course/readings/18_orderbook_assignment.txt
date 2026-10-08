@@ -1,0 +1,317 @@
+================================================================================
+  ASSIGNMENT — C++ LIMIT ORDER BOOK
+  A class handout. Build this in a NEW repo. Do not modify TradingEngine.
+================================================================================
+
+HOW TO USE THIS FILE
+--------------------
+Work the problems in order. A problem is done when every box under
+"Turn in" is checked. Do not start the next problem early.
+
+Readings are in this same cpp-course folder. Read the listed lesson
+before the problem, then come back here for what to build.
+
+Do not open 14b_reference_solution.txt until Problem 5 is finished.
+That file is the answer key.
+
+
+RULES FOR EVERY PROBLEM
+-----------------------
+- C++20. Warnings are errors: -Wall -Wextra -Wpedantic -Werror.
+- Debug builds use -fsanitize=address,undefined.
+- The order book library does no I/O: no cout, no HTTP, no JSON,
+  no globals, no "using namespace std", no shared_ptr.
+- The book owns each Order. Orders live in a std::list at their price.
+- Match first, then rest whatever is left. A crossed order never sits
+  in the book.
+- A trade's price is the resting order's price, not the incoming one.
+- Prices are integer ticks. 100 means 100, not 1.00.
+
+
+================================================================================
+PROBLEM 0 — TOOLCHAIN
+Reading: 01_toolchain_and_compilation.txt
+================================================================================
+
+Write check.cpp that prints the __cplusplus macro with std::format.
+Compile with -std=c++20.
+
+Turn in:
+  [ ] ./check prints a number (202002 or higher)
+  [ ] clangd is installed in the editor
+
+
+================================================================================
+PROBLEM 1 — TYPES
+Reading: 02_types_integers_enums.txt, 03_classes_constructors_const.txt
+================================================================================
+
+In a scratch file, define:
+
+  using Price    = std::int32_t;
+  using Quantity = std::uint32_t;
+  using OrderId  = std::uint64_t;
+
+  enum class Side      { Buy, Sell };
+  enum class OrderType { GoodTillCancel, FillAndKill };
+
+  struct Order {
+      OrderId id;
+      Side side;
+      OrderType type;
+      Price price;
+      Quantity remaining;
+  };
+
+  struct Trade {
+      OrderId buyId;
+      OrderId sellId;
+      Price price;
+      Quantity quantity;
+  };
+
+Write a main that makes one sell order (id 1, price 100, quantity 5)
+and prints its id and price.
+
+Turn in:
+  [ ] The program compiles with -Wall -Wextra -Wpedantic -Werror
+  [ ] You can say why Price is signed and Quantity is unsigned
+  [ ] You can say why Side is an enum class, not a string
+
+
+================================================================================
+PROBLEM 2 — PROJECT SKELETON AND ONE FAILING TEST
+Reading: 14_your_project_layout_cmake_tests.txt (sections 1-4)
+         04_values_references_pointers.txt
+================================================================================
+
+Create a new repo, orderbook/, with this layout:
+
+  orderbook/
+    CMakeLists.txt
+    .gitignore                 build/ is ignored
+    include/orderbook/
+      types.hpp
+      order.hpp
+      orderbook.hpp
+    src/orderbook.cpp
+    tests/orderbook_test.cpp
+
+Public interface (put this in the headers; leave the .cpp as stubs):
+
+  class Orderbook {
+  public:
+      [[nodiscard]] std::vector<Trade> add(Order order);
+      bool cancel(OrderId id);
+      std::optional<Price> bestBid() const;
+      std::optional<Price> bestAsk() const;
+      std::size_t size() const;
+  };
+
+Stubs may return {} , false, std::nullopt, and 0.
+
+CMake: C++20, sanitizers ON by default, -Werror, Catch2 via FetchContent,
+the library target orderbook_core, the test target orderbook_tests.
+Copy the CMake sketch from lesson 14 section 3.
+
+One test, which must FAIL on the stubs:
+
+  TEST_CASE("an order that does not cross rests") {
+      Orderbook book;
+      auto trades = book.add(
+          {1, Side::Buy, OrderType::GoodTillCancel, 100, 10});
+      REQUIRE(trades.empty());
+      CHECK(book.size() == 1);
+      CHECK(book.bestBid() == Price{100});
+      CHECK_FALSE(book.bestAsk().has_value());
+  }
+
+Build:
+
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+  cmake --build build
+  ctest --test-dir build --output-on-failure
+
+Turn in:
+  [ ] ctest runs and this one test fails for the right reason
+      (size is 0, or bestBid is empty), not because the project
+      failed to compile
+  [ ] You can say what goes in a header and what goes in a .cpp
+
+
+================================================================================
+PROBLEM 3 — REST, CANCEL, BEST PRICES
+Reading: 05_ownership_smart_pointers_move.txt
+         06_stl_containers.txt
+         07_iterators_and_invalidation.txt
+================================================================================
+
+Data, private to Orderbook:
+
+  using Level = std::list<Order>;
+  std::map<Price, Level, std::greater<Price>> bids_;   // best bid = begin()
+  std::map<Price, Level, std::less<Price>>    asks_;   // best ask = begin()
+  std::unordered_map<OrderId, Level::iterator> index_; // id -> list node
+
+Behavior for this problem: no order crosses, so add only rests.
+
+  add
+    Reject a duplicate id: return an empty vector and do not insert.
+    Reject quantity 0 the same way.
+    Otherwise append the order to the back of its price level
+    (create the level if needed) and store the list iterator in index_.
+    Return an empty trade vector.
+  cancel
+    Unknown id: return false.
+    Known id: erase that list node, erase the index entry, erase the
+    price level if its list is now empty, return true.
+    Canceling the same id twice returns false the second time.
+  bestBid / bestAsk
+    Empty side: std::nullopt. Otherwise the first key in that map.
+  size
+    index_.size().
+
+Write these tests before the implementation. Keep the Problem 2 test.
+
+  "cancel removes a resting order"
+      Buy 99 x 10, id 1. cancel(1) is true. cancel(1) is false.
+      bestBid() is empty. size() is 0.
+
+  "cancel of an unknown id does nothing"
+
+  "the last order at a price removes that level"
+      Two buys at 100 (ids 1 and 2). Cancel 1. bestBid() is still 100
+      and size() is 1. Cancel 2. bestBid() is empty.
+
+  "duplicate ids are rejected"
+      Two adds with id 1. size() is 1. The second add returns no trades.
+
+  "a zero-quantity order is rejected"
+      size() stays 0. bestBid() is empty.
+
+  "best bid and best ask are empty on a new book"
+
+Turn in:
+  [ ] ctest passes under sanitizers, including the Problem 2 test
+  [ ] Zero warnings
+  [ ] You can explain why the index stores an iterator, not a second Order
+
+
+================================================================================
+PROBLEM 4 — MATCHING
+Reading: 13_architecture_walkthrough.txt, section 5 only
+         08_undefined_behavior_case_study.txt (so you do not copy the bug)
+================================================================================
+
+Extend add. Incoming quantity that trades is filled against the opposite
+side before anything rests.
+
+Loop while the incoming order still has quantity and the opposite side
+can trade with it:
+
+  A buy trades while best ask exists and incoming.price >= best ask.
+  A sell trades while best bid exists and incoming.price <= best bid.
+
+At the inside level, trade against the front order (oldest) first:
+
+  quantity = min(incoming.remaining, resting.remaining)
+  Both remainings decrease by quantity.
+  Append a Trade. price is the RESTING order's price.
+  buyId is the buyer's id, sellId is the seller's id.
+  If the resting order's remaining hits 0, erase it the same way cancel
+  does (including dropping an empty level).
+
+After the loop:
+
+  GoodTillCancel with remaining > 0 rests, same as Problem 3.
+  FillAndKill never rests. Discard whatever is left.
+  If nothing was traded and nothing rested, return an empty vector.
+  An order that fully fills does not rest. size() counts resting orders.
+
+Work these by hand before coding. Your tests must match them.
+
+  Example A — full fill at the resting price
+    Book: sell id 1, price 100, qty 5.
+    Incoming: buy id 2, price 101, qty 5, GoodTillCancel.
+    One trade: buy 2, sell 1, price 100, qty 5.
+    Book is empty.
+
+  Example B — partial fill, remainder rests
+    Book: sell id 1, price 100, qty 5.
+    Incoming: buy id 2, price 100, qty 12, GoodTillCancel.
+    One trade: price 100, qty 5.
+    Book: buy 100 x 7, id 2. bestBid() is 100. bestAsk() is empty.
+
+  Example C — sweep two levels
+    Book: sell id 1, price 100, qty 5.
+          sell id 2, price 101, qty 10.
+    Incoming: buy id 3, price 101, qty 12, GoodTillCancel.
+    Trade 1: sell 1, price 100, qty 5.
+    Trade 2: sell 2, price 101, qty 7.
+    Book: sell 101 x 3, id 2.
+
+  Example D — price-time priority
+    Book: sell id 1, price 100, qty 10.   (older)
+          sell id 2, price 100, qty 10.
+    Incoming: buy id 3, price 100, qty 10.
+    The only trade is against id 1.
+    Book: sell 100 x 10, id 2.
+
+  Example E — no cross
+    Book: sell id 1, price 105, qty 10.
+    Incoming: buy id 2, price 100, qty 10.
+    No trades. Both rest. bestBid 100, bestAsk 105.
+
+Tests, one per example, plus:
+
+  "a sell hits the best bid and trades at the bid"
+    Book: buy 100 x 4, id 1.
+    Incoming: sell 99 x 4, id 2.
+    Trade price is 100.
+
+Turn in:
+  [ ] Examples A-E and the sell-hits-bid test pass under sanitizers
+  [ ] Every Problem 2 and Problem 3 test still passes
+  [ ] You can state the two rules: price priority, then time priority
+
+
+================================================================================
+PROBLEM 5 — FILL-AND-KILL
+No new reading. Do this before you open 14b.
+================================================================================
+
+  FillAndKill that cannot match is rejected.
+    Book: sell 105 x 10.
+    Incoming: buy 100 x 10, FillAndKill.
+    No trades. size() is still 1. The new id is not in the book.
+
+  FillAndKill trades and discards the remainder.
+    Book: sell 100 x 4, id 1.
+    Incoming: buy 100 x 10, FillAndKill, id 2.
+    One trade, qty 4, price 100.
+    size() is 0. bestBid() is empty. id 2 does not rest.
+
+  FillAndKill that fully fills leaves nothing behind.
+    Book: sell 100 x 10.
+    Incoming: buy 100 x 10, FillAndKill.
+    One trade. Book is empty.
+
+Turn in:
+  [ ] Those three tests pass
+  [ ] ctest is green with sanitizers and -Werror
+  [ ] Now read 14b_reference_solution.txt
+  [ ] Write a short note (half a page): every place your code differs,
+      and which version you prefer and why
+
+
+================================================================================
+DONE
+================================================================================
+
+Problem 5 is the assignment. The resume line that matches this work is
+the order-book library, not the Go gateway and not the website.
+
+Optional later problems, each its own week, are milestone 2 and 3 in
+16_roadmap_and_capstone.txt (modify, market orders, depth snapshot,
+benchmark). Do not start those until the note in Problem 5 is written.
+================================================================================

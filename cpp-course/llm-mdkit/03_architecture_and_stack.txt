@@ -1,0 +1,88 @@
+================================================================================
+  ARCHITECTURE AND TECH STACK  — paste with every session
+================================================================================
+
+ONE SENTENCE
+A C++20 library decodes Nasdaq ITCH 5.0 and IEX DEEP, rebuilds books,
+and is driven by CLI tools and a Python binding. Not a matching engine.
+Not a website.
+
+LAYERS (dependencies point down only)
+
+  tools/     mdcat mdstat mdbook mdconvert mdbench
+             stretch: mdreplay mdlisten, optional mdsnap REST
+  python/    pybind11 module `mdkit`
+  libs/      io, itch, iex, normalize, book
+  data       ITCH length-prefixed files; IEX HIST pcap/pcapng
+
+The library does not print, parse argv, or know about Python.
+Tools and bindings call the library.
+
+DATA FLOW
+  bytes (mapped file or UDP payload)
+    -> framing (ITCH: 2-byte BE length; IEX: pcap, UDP, 40-byte IEX-TP,
+       then 2-byte LE message length)
+    -> typed message (visitor: handler.on(AddOrder), not a variant
+       per message on the hot path)
+    -> book builder OR counter OR printer
+  Normalization (std::variant Event) is for CSV/Python, not for mdbench.
+
+TWO FEEDS, ON PURPOSE
+  ITCH 5.0   big-endian, market-by-order, order reference numbers,
+             file is a bare message stream
+  IEX DEEP   little-endian, market-by-price (level size, no order id),
+             messages sit inside IEX-TP inside UDP inside pcap
+  A third internal type, Event, lets mdstat and mdconvert ignore which
+  file they were given.
+
+BOOKS
+  ITCH: unordered_map<OrderRef, LiveOrder> plus vector<Book> indexed
+        by 16-bit stock locate (size 65536). Book is
+        map<price, {shares, orderCount}> bids descending, asks ascending.
+  IEX:  no order-id map. Apply level updates onto the same Book type.
+
+REPO SHAPE
+  include/mdkit/{endian,types,io,itch,iex,normalize,book}
+  src/          matching .cpp files
+  tools/        one main() each
+  tests/        Catch2 + tiny binary fixtures you generate, not GB days
+  bench/        Release only
+  python/bindings.cpp
+  .github/workflows/ci.yml   ubuntu (sanitizers ON) and windows (OFF)
+
+STACK — USE
+  C++20, CMake >= 3.20, Catch2, Google Benchmark, CLI11
+  Python 3 + pybind11 for the binding only
+  spdlog or a tiny level logger in tools, never in decode
+  nlohmann/json + cpp-httplib only in optional mdsnap
+  GitHub Actions: ubuntu-latest and windows-latest
+  POSIX mmap and Windows MapViewOfFile behind one MappedFile class
+
+STACK — DO NOT USE
+  Go, Node, React, a Go gateway, HTTP as the parse path,
+  nlohmann inside decode, shared_ptr per message, #pragma pack for
+  on-wire structs, libpcap unless Windows CI cannot avoid it
+  (prefer a small pcap/pcapng reader).
+
+CONFIDENCE
+  Confirmed by SIG postings: C++, Python, Linux and Windows, parsing,
+  order books, low-latency structures, CLI/debug tools, REST somewhere.
+  Industry assumption, not confirmed for SIG: CMake, Catch2, CLI11,
+  ITCH + IEX specifically, UDP multicast.
+  Awareness only, do not build: FPGA, kernel-bypass NICs, OPRA.
+
+SPECS AND DATA (do not commit multi-GB files)
+  ITCH 5.0 PDF:
+    nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHSpecification.pdf
+  Sample days (check size first; many GB compressed):
+    https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/
+  IEX HIST (free pcap, trailing 12 months):
+    https://iextrading.com/trading/market-data/#hist-download
+  IEX transport PDF: iex.io documents "IEX Transport Specification"
+  Filename encodes versions, e.g. YYYYMMDD_IEXTP1_DEEP1.0.pcap.gz.
+  Decode with that version. Do not mix DEEP and TOPS layouts.
+
+PORTABILITY
+  One #ifdef, inside MappedFile. Everywhere else: std::filesystem,
+  spans, explicit loads. Open fixtures as binary. CI is the proof of
+  Windows, not a cross-compile from a Mac.

@@ -1,0 +1,222 @@
+================================================================================
+  LESSON 07 — ITERATORS AND ITERATOR INVALIDATION
+  Part 2: Memory and Data Structures  |  ~1.5 hrs  |  Prereqs: 06
+================================================================================
+
+GOAL
+----
+- Understand what an iterator is and how begin()/end() work.
+- Use std::next, std::prev, and erase-while-iterating correctly.
+- Know the invalidation rules for each major container.
+- Understand the order book's key trick: storing an iterator for O(1) cancel.
+
+
+PYTHON VS C++
+-------------
+Python iterators are objects you call next() on until StopIteration. You
+rarely hold on to one.
+
+C++ iterators are generalized POINTERS into a container. You can store
+them, compare them, move them forward (and sometimes backward), and hand
+them to erase(). They're powerful, but an iterator can go stale when its
+container changes. Using a stale ("invalidated") iterator is undefined
+behavior.
+
+
+--------------------------------------------------------------------------------
+1. THE BASICS
+--------------------------------------------------------------------------------
+
+    std::vector<int> v{10, 20, 30};
+
+    auto it = v.begin();   // points at 10
+    *it;                   // 10  (dereference, like a pointer)
+    ++it;                  // now points at 20
+    it = v.end();          // one PAST the last element. NEVER dereference end()
+
+    for (auto it = v.begin(); it != v.end(); ++it) {
+        std::cout << *it;
+    }
+
+The range-for loop "for (const auto& x : v)" is shorthand for exactly that
+loop.
+
+For maps, *it is a std::pair<const Key, Value>:
+    auto it = m.begin();
+    it->first;      // the key
+    it->second;     // the value
+
+Iterator types have long names, which is where auto earns its keep:
+    std::map<Price, std::list<std::shared_ptr<Order>>, std::greater<Price>>::iterator it;
+    auto it = bids_.begin();    // same thing
+
+
+--------------------------------------------------------------------------------
+2. MOVING ITERATORS
+--------------------------------------------------------------------------------
+
+    std::next(it)         // one step forward (a copy; it is unchanged)
+    std::next(it, n)      // n steps forward
+    std::prev(it)         // one step back (bidirectional iterators only)
+    std::prev(v.end())    // the last element
+
+COST DEPENDS ON THE CONTAINER
+  vector/deque iterators are "random access": std::next(it, n) is O(1).
+  list/map iterators are "bidirectional": std::next(it, n) walks n steps,
+  which is O(n).
+
+
+--------------------------------------------------------------------------------
+3. INVALIDATION RULES (memorize the short version)
+--------------------------------------------------------------------------------
+
+  An iterator, pointer, or reference is INVALIDATED when the thing it
+  points to moves or is destroyed. Using it afterwards = undefined behavior.
+
+  vector:
+    - push_back/insert: if capacity grows, ALL iterators and references are
+      invalidated (the elements moved to a new buffer). Otherwise, those at
+      or after the insertion point.
+    - erase: iterators at or after the erased element are invalidated.
+  deque:
+    - insert in the middle invalidates everything. Pushing at either end
+      invalidates iterators (but not references). It's complicated; look
+      it up when you need it.
+  list:
+    - Only iterators to ERASED elements are invalidated. Inserting and
+      erasing OTHER elements never affects your iterator. (This is the
+      reason the order book uses list.)
+  map / set:
+    - Same as list: only erased elements.
+  unordered_map / unordered_set:
+    - Erase: only the erased elements.
+    - A rehash (when it grows) invalidates ITERATORS, but references and
+      pointers to elements stay valid.
+
+  Verified while writing:
+      std::list<int> fifo{10, 20, 30};
+      auto it = std::prev(fifo.end());    // points at 30
+      fifo.push_back(40);
+      fifo.erase(fifo.begin());           // erase 10
+      *it;                                // still 30, still valid
+
+
+--------------------------------------------------------------------------------
+4. ERASING WHILE ITERATING
+--------------------------------------------------------------------------------
+
+WRONG (it is invalidated by erase, then incremented):
+    for (auto it = v.begin(); it != v.end(); ++it)
+        if (*it % 2 == 0) v.erase(it);
+
+RIGHT (erase returns the next valid iterator):
+    for (auto it = v.begin(); it != v.end(); ) {
+        if (*it % 2 == 0) it = v.erase(it);
+        else ++it;
+    }
+
+BEST (C++20, one line):
+    std::erase_if(v, [](int x){ return x % 2 == 0; });
+
+Python analogy: modifying a list while iterating over it is also a bug in
+Python, but Python gives you a confusing result. C++ gives you undefined
+behavior.
+
+
+--------------------------------------------------------------------------------
+5. THE ORDER BOOK'S KEY TRICK
+--------------------------------------------------------------------------------
+
+Problem: cancelling order #4521 means removing it from the MIDDLE of its
+price level's queue. Searching the list would be O(n).
+
+Solution: when an order is added, remember an iterator to its exact spot
+in the list. On cancel, look the iterator up by id and erase it directly.
+
+    struct OrderEntry {
+        OrderPointer order_;
+        OrderPointers::iterator location_;   // where it sits in its level
+    };
+    std::unordered_map<OrderId, OrderEntry> orders_;
+
+    // on add:
+    auto& orders = bids_[price];
+    orders.push_back(order);
+    orders_.insert({id, OrderEntry{order, <iterator to the new element>}});
+
+    // on cancel:
+    orders.erase(entry.location_);   // O(1), no search
+
+This only works because std::list iterators stay valid while OTHER orders
+are added and removed (section 3). With a std::vector, the stored iterators
+would go stale on the next reallocation or erase.
+
+
+IN THIS REPO
+------------
+  backend/engine/Server.cpp:180-183   OrderEntry: order + list iterator
+  backend/engine/Server.cpp:341-354   AddOrder captures the iterator
+  backend/engine/Server.cpp:376, 382  CancelOrder erases by iterator
+
+  A SUBTLE PERFORMANCE BUG (Server.cpp:348 and 353)
+      iterator = std::next(orders.begin(), orders.size()-1);
+  This gets an iterator to the last element by walking from the FRONT of
+  a linked list: O(n) for a level with n orders. The whole point of the
+  design was O(1). Correct version:
+      iterator = std::prev(orders.end());
+  (It's also valid right after push_back because push_back puts the new
+  element at the end.)
+
+  HOW THE ORIGINAL MATCHING BUG HAPPENED (preview of lesson 08)
+  Before commit e107e23, MatchOrders did this:
+      auto& bid = bids.front();       // reference to the list's first element
+      ...
+      bids.pop_front();               // destroys that element
+      orders_.erase(bid->GetOrderId());   // uses the destroyed element!
+  That's a reference invalidated by erasing the element it referred to.
+
+
+PITFALLS
+--------
+- Dereferencing end().
+- Holding a vector iterator (or reference, or pointer) across push_back.
+- Erasing inside a range-for loop.
+- Using std::next(begin, size-1) on a list or map (O(n)); use std::prev(end).
+- Storing iterators into a container that might be destroyed or cleared.
+  Every stored iterator becomes invalid after .clear().
+
+
+EXERCISES
+---------
+1. Loop over a std::map<std::string, int> with explicit iterators, printing
+   it->first and it->second. Then rewrite it with structured bindings.
+
+2. Remove all even numbers from a vector three ways: the wrong loop (build
+   with -fsanitize=address -g and watch it fail), the "it = v.erase(it)"
+   loop, and std::erase_if.
+
+3. Demonstrate vector invalidation:
+       std::vector<int> v{1, 2, 3};
+       int& first = v[0];
+       for (int i = 0; i < 100; ++i) v.push_back(i);
+       std::cout << first;       // undefined behavior
+   Build with -fsanitize=address -g and read the report.
+
+4. Fix Server.cpp:348 and 353 to use std::prev(orders.end()). Then write a
+   tiny benchmark: add 50,000 orders at the SAME price and time it before
+   and after the fix.
+
+5. Answer lesson 05's exercise 5: in the value-based design
+   (std::list<Order> + index of iterators), what happens to a stored
+   iterator when OTHER orders are erased from the same list?
+
+
+CHECKPOINT
+----------
+[ ] What does end() point at?
+[ ] Why is std::next(it, n) O(n) for a list but O(1) for a vector?
+[ ] Which containers keep iterators valid when OTHER elements are erased?
+[ ] Why does the order book need that property?
+[ ] What's wrong with Server.cpp:348, and what's the fix?
+
+Next: 08_undefined_behavior_case_study.txt

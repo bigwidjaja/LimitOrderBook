@@ -1,0 +1,210 @@
+================================================================================
+  LESSON 10 — EXCEPTIONS AND RAII (C++'S REPLACEMENT FOR finally)
+  Part 3: Writing Real C++  |  ~1 hr  |  Prereqs: 05
+================================================================================
+
+GOAL
+----
+- Throw and catch exceptions the C++ way.
+- Understand RAII, the single most important C++ idiom.
+- Know the alternatives to exceptions: std::optional, std::expected, and
+  error codes.
+
+
+PYTHON VS C++
+-------------
+Python: try / except / finally, plus "with" for cleanup (files, locks).
+
+C++: try / catch, but NO finally. Instead, cleanup lives in DESTRUCTORS.
+When an exception is thrown, C++ destroys every local object between the
+throw and the catch ("stack unwinding"), so their destructors run. That
+mechanism is called RAII, and it makes "with" blocks unnecessary: every
+object behaves like one.
+
+
+--------------------------------------------------------------------------------
+1. THROWING AND CATCHING
+--------------------------------------------------------------------------------
+
+    #include <stdexcept>
+
+    void Fill(Quantity q) {
+        if (q > remaining_)
+            throw std::logic_error("cannot fill more than remaining");
+        remaining_ -= q;
+    }
+
+    try {
+        order.Fill(1000);
+    } catch (const std::logic_error& e) {    // catch by CONST REFERENCE
+        std::cerr << "logic error: " << e.what() << "\n";
+    } catch (const std::exception& e) {      // any standard exception
+        std::cerr << "error: " << e.what() << "\n";
+    } catch (...) {                          // literally anything
+        std::cerr << "unknown error\n";
+    }
+
+Catch the most specific type first. Always catch by const reference
+(catching by value copies the exception and can "slice" off the derived
+type's information).
+
+THE STANDARD HIERARCHY (the useful parts)
+    std::exception
+      std::logic_error       bugs in the program: invalid_argument,
+                             out_of_range, domain_error, length_error
+      std::runtime_error     problems at runtime: overflow_error, range_error, ...
+      std::bad_alloc         out of memory
+
+  Things that throw on their own:
+    std::stoi("abc")    -> std::invalid_argument
+    std::stoi("9999999999999") -> std::out_of_range
+    v.at(100)           -> std::out_of_range
+    m.at(missingKey)    -> std::out_of_range
+
+  NOT exceptions, but undefined behavior instead: v[100], dereferencing
+  nullptr, integer division by zero. C++ doesn't check these for you.
+
+YOUR OWN EXCEPTION TYPE
+    class OrderRejected : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;   // reuse the constructors
+    };
+    throw OrderRejected("duplicate order id");
+
+noexcept
+    Marks a function as never throwing. If it throws anyway, the program
+    terminates. Destructors and move constructors should be noexcept, and
+    they are by default.
+
+
+--------------------------------------------------------------------------------
+2. RAII: RESOURCE ACQUISITION IS INITIALIZATION
+--------------------------------------------------------------------------------
+
+Terrible name, simple idea:
+  - Acquire the resource in a constructor.
+  - Release it in the destructor.
+  - Because destructors ALWAYS run when an object goes out of scope, even
+    during an exception, cleanup can't be forgotten.
+
+    {
+        std::ifstream file("orders.csv");   // opens the file
+        std::lock_guard<std::mutex> lock(m); // locks the mutex
+        auto p = std::make_unique<Order>(...); // allocates memory
+        processOrThrow();
+    }   // leaving the block (normally OR via an exception):
+        // p deletes the Order, lock unlocks the mutex, file closes the file.
+        // They're destroyed in REVERSE order of creation.
+
+Python equivalents:
+    with open("orders.csv") as f:   ->  std::ifstream f("orders.csv");
+    with lock:                      ->  std::lock_guard<std::mutex> g(lock);
+
+Everything you've already used is RAII: std::string, std::vector,
+std::unique_ptr, std::shared_ptr, std::lock_guard, std::ifstream. That's
+why the rule of zero (lesson 05) works.
+
+BARE BLOCKS TO CONTROL LIFETIME
+You can add { } anywhere, just to end a lifetime early:
+    {
+        std::lock_guard<std::mutex> lock(gLock);
+        // ... critical section ...
+    }   // unlocked HERE, not at the end of the function
+    slowNetworkCall();   // runs WITHOUT the lock held
+
+NEVER THROW FROM A DESTRUCTOR. A destructor that throws during stack
+unwinding terminates the program.
+
+
+--------------------------------------------------------------------------------
+3. ALTERNATIVES TO EXCEPTIONS
+--------------------------------------------------------------------------------
+
+Exceptions are for exceptional situations. For expected failures ("order id
+not found"), a return value is often clearer:
+
+  std::optional<T> (C++17): a value OR nothing
+    std::optional<Price> bestBid() const;
+    if (auto b = book.bestBid()) use(*b);
+
+  std::expected<T, E> (C++23): a value OR an error
+    std::expected<Trade, std::string> tryFill(...);
+    auto r = tryFill(...);
+    if (!r) std::cerr << r.error();
+
+  bool / enum status codes, when you just need success or failure:
+    bool cancel(OrderId id);    // false if not found
+
+  Low-latency trading systems often avoid exceptions in the hot path and
+  use return values instead. That's a design choice you'll make in your
+  project.
+
+
+IN THIS REPO
+------------
+  backend/engine/Server.cpp:89-96
+      Fill() throws std::logic_error on overfill.
+  backend/engine/Server.cpp:599-640 (server_trade)
+      try { ... } catch (const std::exception& e) { ... } catch (...) { ... }
+      Parse errors from std::stoull/stoi land in the first catch and return
+      HTTP 500. Arguably a malformed request should be HTTP 400 (client
+      error), not 500 (server error). Exercise 3 fixes that.
+  backend/engine/Server.cpp:620-626
+      A bare { } block so the lock_guard unlocks before the response is
+      written. RAII in action.
+  backend/engine/Server.cpp:645-680 (server_cancel)
+      Only has catch (...), so the actual error message is lost. Also, its
+      lock_guard (line 659) has no surrounding block, so the lock is held
+      until the function returns, including the console output.
+  backend/engine/Server.cpp:866-876 (main)
+      std::stoi on the port argument, wrapped in try/catch with a default.
+  backend/engine/Server.cpp:333-337, 363-365
+      AddOrder and CancelOrder report "not found" or "rejected" by
+      returning early with nothing. The caller can't tell a rejection from
+      "no trades happened". Returning a status would be clearer.
+
+
+PITFALLS
+--------
+- Catching by value.
+- catch (...) that throws away the error message.
+- Using exceptions for normal control flow ("not found" is normal).
+- Assuming v[i] or *nullptr throws. They don't; they're UB.
+- Manual cleanup code that an exception can skip. Use RAII instead.
+- Holding a lock longer than needed because the lock_guard's scope is
+  too big.
+
+
+EXERCISES
+---------
+1. Write a function that calls std::stoi on user input and handles
+   invalid_argument and out_of_range separately with different messages.
+
+2. Write an RAII class Timer that records std::chrono::steady_clock::now()
+   in its constructor and prints the elapsed microseconds in its
+   destructor. Use it like:
+       { Timer t("matching"); book.AddOrder(...); }
+   Throw an exception inside the block and confirm it still prints.
+
+3. Fix server_trade (Server.cpp:599-640) so parse errors return 400 with
+   a clear message and only unexpected errors return 500. Hint: catch
+   std::invalid_argument and std::out_of_range first.
+
+4. Give server_cancel a catch (const std::exception& e) that includes
+   e.what(), and wrap its lock_guard in a block so the lock is released
+   before the console output.
+
+5. Change Orderbook::CancelOrder to return bool (true if something was
+   cancelled). Update server_cancel to use it instead of comparing sizes
+   before and after (Server.cpp:661-666).
+
+
+CHECKPOINT
+----------
+[ ] Why doesn't C++ need finally?
+[ ] What happens to local objects when an exception is thrown?
+[ ] Why catch by const reference?
+[ ] Which of these throw: v.at(99), v[99], std::stoi("x"), m.at(k)?
+[ ] When would you use std::optional instead of throwing?
+
+Next: 11_concurrency.txt

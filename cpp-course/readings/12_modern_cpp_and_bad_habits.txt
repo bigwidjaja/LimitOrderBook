@@ -1,0 +1,206 @@
+================================================================================
+  LESSON 12 — MODERN C++ FEATURES AND HABITS TO AVOID
+  Part 3: Writing Real C++  |  ~1 hr  |  Prereqs: 11
+================================================================================
+
+GOAL
+----
+- Know the modern (C++17/20/23) features worth using every day.
+- Recognize the bad habits in this repo, so you don't copy them.
+- Know which libraries to reach for instead of hand-rolling (JSON, HTTP,
+  testing).
+
+
+PYTHON VS C++
+-------------
+C++ is 40+ years old, and a lot of online C++ code is written in the
+style of 1998. "Modern C++" (C++11 onward, and especially C++17/20) is a
+much nicer language. When you search for help, prefer answers that use
+auto, smart pointers, and the standard library over ones full of
+new/delete, char*, and macros.
+
+
+--------------------------------------------------------------------------------
+1. MODERN FEATURES WORTH USING
+--------------------------------------------------------------------------------
+
+  FEATURE                     VERSION  EXAMPLE
+  --------------------------  -------  ---------------------------------------
+  auto                        11       auto it = m.find(k);
+  range-for                   11       for (const auto& x : v)
+  nullptr                     11       instead of NULL or 0
+  enum class                  11       enum class Side { Buy, Sell };
+  smart pointers              11/14    std::make_unique<T>(...)
+  lambdas                     11       [&](int x){ ... }
+  constexpr                   11+      constexpr int kMaxLevels = 1000;
+  structured bindings         17       auto [k, v] = pair;
+  std::optional               17       std::optional<Price> bestBid();
+  std::string_view            17       void parse(std::string_view s);
+  std::variant                17       std::variant<NewOrder, Cancel> msg;
+  if with initializer         17       if (auto it = m.find(k); it != m.end())
+  map::contains               20       m.contains(k)
+  std::format                 20       std::format("{} @ {}", qty, price)
+  std::span                   20       void f(std::span<const int> data);
+  concepts                    20       template <std::integral T>
+  ranges                      20       std::ranges::sort(v);
+  operator<=> (spaceship)     20       auto operator<=>(const X&) const = default;
+  std::expected               23       std::expected<Trade, Error>
+  [[nodiscard]]               17       [[nodiscard]] bool cancel(OrderId);
+
+A FEW IN MORE DETAIL
+
+  std::string_view: a cheap, non-owning, read-only view of a string (a
+  pointer + a length). Perfect for parameters you only read:
+      std::size_t count_commas(std::string_view s);
+      count_commas("a,b,c");      // no std::string is allocated
+  Danger: it doesn't own the text. Never return a string_view to a local
+  std::string (a dangling view, lesson 08).
+
+  std::optional: "maybe a value". Replaces magic values like -1:
+      std::optional<Price> bestBid() const {
+          if (bids_.empty()) return std::nullopt;
+          return bids_.begin()->first;
+      }
+      if (auto b = book.bestBid()) std::cout << *b;
+
+  std::variant: a type-safe union, "one of these types". Great for
+  messages:
+      using Message = std::variant<NewOrder, CancelOrder, ModifyOrder>;
+      std::visit([](const auto& m){ handle(m); }, msg);
+
+  [[nodiscard]]: the compiler warns if a caller ignores the return value.
+      [[nodiscard]] std::vector<Trade> add(Order o);
+      book.add(o);    // warning: result discarded
+
+  constexpr: computed at compile time. Use it for constants instead of
+  #define.
+
+  std::format: Python's str.format / f-strings for C++:
+      std::format("Order {} filled {}/{}", id, filled, total);
+      std::format("{:>8.2f}", 3.14159);     // "    3.14"
+      std::format("{{literal braces}}");    // {{ }} escapes braces
+
+
+--------------------------------------------------------------------------------
+2. BAD HABITS IN THIS REPO (learn to spot them)
+--------------------------------------------------------------------------------
+
+1. using namespace std; at global scope (Server.cpp:20)
+   Dumps thousands of names into the global namespace. Harmless in one
+   small file, but in a header it leaks into every file that includes it
+   and causes name collisions. Write std:: explicitly. (Notice the file
+   mixes both styles: "string" and "std::string".)
+
+2. Global mutable state (Server.cpp:492-493)
+   gLock and MyMap are globals that every handler touches. That makes
+   testing hard and dependencies invisible. Better: a class (e.g.
+   EngineServer) that OWNS its books and mutex, with handlers as lambdas
+   that capture it.
+
+3. Hand-written JSON parsing (Server.cpp:525-590)
+   extract_json_string / extract_json_number / extract_json_array use
+   find() and substr(). They break on escaped quotes (\"), on a key name
+   that appears inside a value, on "]" inside strings, and on any nesting
+   the author didn't anticipate. Use a library:
+     nlohmann/json   easiest, header-only, very popular
+     glaze           very fast, modern (C++20+)
+     simdjson        extremely fast parsing
+
+4. Building JSON with std::format and no escaping (Server.cpp:690-705, 727)
+   A book name containing a quote character produces broken JSON. The
+   same library fixes this.
+
+5. Debug output in the hot path (Server.cpp:223-323)
+   About 20 std::cout << ... << std::flush lines inside the matching loop.
+   Console output is slow, and std::flush forces a system call every
+   time. The "execution time" the frontend shows is heavily inflated by
+   this. Use a logging library with levels (spdlog), or at least put debug
+   output behind a compile-time flag.
+
+6. Dead and duplicated code
+   setType / setSide (Server.cpp:465-479) duplicate parse_ordertype /
+   parse_side (495-503) with different spellings. struct Counter
+   (481-490) and #include <atomic> are unused.
+
+7. Misleading names
+   Orderbook::MatchOrder (Server.cpp:389) actually MODIFIES an order.
+   Name functions after what they do: ModifyOrder.
+
+8. Magic values instead of types
+   GetBestPrices returns -1 for "no price" (Server.cpp:410-414). But Price
+   is signed and the comments say prices can be negative, so -1 could be
+   a real price. std::optional<Price> expresses "no price" unambiguously.
+
+9. Taking strings by value when they're only read (Server.cpp:465-522)
+   OrderType parse_ordertype(string type) copies the string. Use
+   std::string_view or const std::string&.
+
+10. Everything in one file, with no tests
+    Matching logic, HTTP handlers, JSON handling, and main() are all in
+    Server.cpp. Nothing can be tested in isolation. That's how the lesson
+    08 bug survived (see lesson 14).
+
+11. Committing a compiled binary (backend/engine/server)
+    Build outputs belong in .gitignore.
+
+12. Minor: a double semicolon (Server.cpp:621), and comments that restate
+    the code. Comments should explain WHY, not WHAT.
+
+
+--------------------------------------------------------------------------------
+3. LIBRARIES TO REACH FOR
+--------------------------------------------------------------------------------
+
+  Need               Library
+  -----------------  ---------------------------------------------------
+  JSON               nlohmann/json (easy), glaze (fast)
+  HTTP server        cpp-httplib (what this repo uses), Crow, Drogon,
+                     Boost.Beast (low level)
+  Networking         Boost.Asio / standalone Asio
+  Logging            spdlog
+  Unit tests         Catch2 or GoogleTest
+  Benchmarks         Google Benchmark
+  Formatting (pre-C++20)  fmt (std::format was based on it)
+  Python bindings    pybind11 or nanobind (lesson 15)
+
+  You get these via CMake FetchContent, vcpkg, Conan, or Homebrew
+  (lesson 14).
+
+
+EXERCISES
+---------
+1. Replace GetBestPrices' -1 convention with two functions that return
+   std::optional<Price>. Update the one caller (Server.cpp:825).
+
+2. Change parse_side and parse_ordertype to take std::string_view.
+
+3. Add [[nodiscard]] to Orderbook::AddOrder, then find every caller that
+   ignores its result. (Server.cpp:623 ignores it. Is that OK there?)
+
+4. Model order-book messages with std::variant<NewOrder, CancelOrder> and
+   write a handler using std::visit.
+
+5. (Bigger) In a copy of Server.cpp, replace the three extract_json_*
+   helpers with nlohmann/json. Download the single header json.hpp from
+   the nlohmann/json GitHub releases and #include it, like httplib.h.
+
+6. Put the debug output behind a compile-time switch:
+       #ifdef ENGINE_DEBUG
+       #define DEBUG_LOG(x) (std::cout << x << '\n')
+       #else
+       #define DEBUG_LOG(x) ((void)0)
+       #endif
+   Then build with and without -DENGINE_DEBUG and compare simulation times.
+   (This is one of the few places a macro is still reasonable. Why can't a
+   plain function do the same job at zero cost?)
+
+
+CHECKPOINT
+----------
+[ ] Why is "using namespace std;" in a header especially bad?
+[ ] What does string_view NOT do that std::string does?
+[ ] What's wrong with -1 meaning "no price" in this codebase?
+[ ] Name three ways the hand-written JSON parser can break.
+[ ] Why are the frontend's timing numbers misleading?
+
+Next: 13_architecture_walkthrough.txt

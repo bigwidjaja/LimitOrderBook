@@ -1,0 +1,306 @@
+================================================================================
+  LESSON 13 — ARCHITECTURE OF TRADINGENGINE (FULL WALKTHROUGH)
+  Part 4: Systems and Your Own Project  |  ~1.5 hrs  |  Prereqs: 01-12
+================================================================================
+
+GOAL
+----
+- Understand every component of the system and how they talk to each other.
+- Trace a request end to end.
+- Understand the matching algorithm with a worked example.
+- Evaluate the design: what's good, what's weak, and why.
+
+
+--------------------------------------------------------------------------------
+1. THE BIG PICTURE
+--------------------------------------------------------------------------------
+
+  +---------------------------+
+  |  Next.js frontend  :3000  |   frontend/src/...
+  |  simulation form, results |
+  +-------------+-------------+
+                | JSON over HTTP   (frontend/src/lib/api.ts)
+                v
+  +---------------------------------------------------------------+
+  |  Go API gateway  :8000   (chi router)          backend/...    |
+  |                                                               |
+  |   handlers/        HTTP endpoints under /order/...            |
+  |   engine/Manager   starts & tracks one C++ process per symbol |
+  |   loadbalancer/    symbol -> "http://localhost:PORT"          |
+  |   api/             request/response types, order-id counter   |
+  +------+-----------------------+-----------------------+--------+
+         | form or JSON / HTTP   |                       |
+         v                       v                       v
+  +--------------+       +--------------+        +--------------+
+  | C++ engine   |       | C++ engine   |  ...   | C++ engine   |
+  | :6060  AAPL  |       | :6061  GOOG  |        | :606N  ...   |
+  | httplib      |       | httplib      |        | httplib      |
+  | Orderbook    |       | Orderbook    |        | Orderbook    |
+  +--------------+       +--------------+        +--------------+
+     backend/engine/Server.cpp  (the same binary, started N times)
+
+  Idea: SHARD by symbol. Every stock gets its own process, so books are
+  matched in parallel on different cores and can't interfere with each
+  other.
+
+
+--------------------------------------------------------------------------------
+2. COMPONENTS
+--------------------------------------------------------------------------------
+
+FRONTEND (Next.js / React / Tailwind)
+  src/components/SimulationForm.tsx   configure stocks, number of orders,
+                                      price and quantity ranges
+  src/components/ResultsDisplay.tsx,
+  StockResultCard.tsx                 show results per stock
+  src/lib/api.ts                      calls /order/simulation, /reset,
+                                      /status, /health, /engines
+
+GO GATEWAY (backend/)
+  cmd/api/main.go
+    - Finds the engine binary (ENGINE_PATH env var or a few guessed paths)
+    - Creates the Manager and Balancer, registers the routes
+    - On Ctrl+C / SIGTERM, kills all engine processes (lines 74-82)
+  internal/handlers/api.go
+    - Routes under /order: trade, cancel, status, reset, simulation,
+      health, engines
+    - CORS middleware (allows any origin)
+  internal/engine/manager.go
+    - GetOrSpawnEngine(symbol): starts "server <port>" as a child
+      process, polls GET /status until it answers (up to 5 s)
+    - Ports are handed out sequentially from 6060
+    - Health checks, stop, reset
+  internal/loadbalancer/balancer.go
+    - A map symbol -> base URL, behind an RWMutex
+    - A tuned http.Transport for connection reuse (lines 28-39)
+    - ForwardTrade / ForwardCancel / ForwardBatch / ForwardBatchParallel
+  api/api.go
+    - JSON request/response structs
+    - GetNextOrderId(): a global atomic counter. The GATEWAY assigns order
+      ids, not the engine.
+
+C++ ENGINE (backend/engine/Server.cpp)
+  Endpoints (registered in main, lines 881-885):
+    POST /trade    form params: orderid, tradetype, side, price, quantity, book
+    POST /cancel   form params: orderid, book
+    GET  /status   every book's price levels as JSON
+    POST /reset    clears all books
+    POST /batch    JSON body {"orders":[...]}; adds all of them under one
+                   lock and returns per-book statistics
+  State: a global unordered_map<string, Orderbook> plus one mutex.
+
+STARTUP (start.sh)
+  1. Check that g++, go, and npm exist
+  2. Compile Server.cpp (OS-specific flags)
+  3. go run main.go in the background, with ENGINE_PATH set
+  4. npm run dev in the background
+  5. A trap on Ctrl+C kills everything, then kills anything left on ports
+     6060-6099
+
+
+--------------------------------------------------------------------------------
+3. REQUEST LIFECYCLE: RUNNING A SIMULATION
+--------------------------------------------------------------------------------
+
+  Frontend: POST /order/simulation
+    {"stocks":[{"symbol":"AAPL","numBids":100,"numAsks":100,
+                "priceMin":100,"priceMax":200,
+                "quantityMin":10,"quantityMax":100}, ...]}
+
+  Go: handlers/Simulation.go
+    a. Validate: symbols not empty, min <= max              (lines 39-54)
+    b. SpawnEnginesForSymbols(symbols)                      (line 65)
+         -> one goroutine per symbol -> GetOrSpawnEngine
+         -> exec.Command("server", "6061") ... poll /status
+         (These actually run one at a time; see lesson 11.)
+    c. balancer.RegisterEngines(mapping)                    (line 78)
+    d. Reset every engine in parallel: POST :PORT/reset     (line 82)
+    e. Generate random GTC orders per symbol, each with a
+       fresh id from the atomic counter                     (lines 84-136)
+    f. START TIMER                                          (line 147)
+    g. ForwardBatchParallel: one goroutine per symbol, each
+       POSTs a JSON batch to that symbol's engine /batch    (line 149)
+    h. STOP TIMER                                           (line 154)
+    i. Combine the per-symbol results into one response     (lines 156-194)
+
+  C++: server_batch (Server.cpp:770-861)
+    - extract_json_array splits the body into order objects
+    - Lock gLock
+    - For each order: parse its fields, then MyMap[book].AddOrder(...),
+      and count trades and volume
+    - Build the result JSON (best bid/ask, remaining orders, levels)
+    - Unlock
+
+  What the "execution time" actually measures: JSON encoding in Go, an
+  HTTP round trip, hand-rolled JSON parsing in C++, matching (with ~20
+  flushed console writes per match), building the JSON response, and
+  decoding it in Go. The matching itself is a small fraction of that.
+
+
+--------------------------------------------------------------------------------
+4. REQUEST LIFECYCLE: A SINGLE TRADE
+--------------------------------------------------------------------------------
+
+  curl -X POST localhost:8000/order/trade \
+    -d '{"tradetype":"GTC","side":"BUY","price":100,"quantity":50,"name":"AAPL"}'
+
+  Go: handlers/Trade.go
+    - Decode the JSON, assign an id with GetNextOrderId()
+    - Convert it to form values (orderid=...&book=AAPL&...)
+    - IF the balancer already knows AAPL: forward to its engine (lines 39-60)
+    - ELSE fall back to http://localhost:6060/trade (lines 62-100)
+
+  THE SUBTLE ISSUE: /order/trade never SPAWNS an engine. Only a
+  simulation does. So:
+    - Before any simulation: trades go to :6060, and fail unless you
+      started an engine there by hand.
+    - After a simulation for, say, GOOG only: a trade for AAPL isn't
+      registered, so it falls back to :6060, which is GOOG's engine. The
+      engine happily creates an AAPL book in GOOG's process. That works,
+      but it quietly breaks the one-process-per-symbol design.
+
+  C++: server_trade (Server.cpp:599-640)
+    - Read the form params; return 400 if any are missing
+    - Parse them (throws on bad numbers -> 500)
+    - Lock, MyMap[book].AddOrder(make_shared<Order>(...)), unlock
+    - Respond {"message": "Order placed successfully"}. Note that the
+      resulting trades are NOT returned to the caller.
+
+  Cancel works the same way (handlers/Cancel.go). Its JSON fields are
+  "orderID" and "name" (api/api.go:29-32).
+
+
+--------------------------------------------------------------------------------
+5. INSIDE THE ORDER BOOK
+--------------------------------------------------------------------------------
+
+DATA STRUCTURES (Server.cpp:180-189)
+
+  bids_   map<Price, list<shared_ptr<Order>>, greater>   best bid = begin()
+  asks_   map<Price, list<shared_ptr<Order>>, less>      best ask = begin()
+  orders_ unordered_map<OrderId, {shared_ptr<Order>, list iterator}>
+
+      bids_ (high -> low)             asks_ (low -> high)
+      105: [#7 x10] [#9 x5]           106: [#3 x20]
+      104: [#2 x30]                   108: [#4 x10] [#8 x15]
+      100: [#1 x50]
+           front = oldest (FIFO)
+
+  PRICE-TIME PRIORITY: the best price trades first; at the same price, the
+  oldest order trades first.
+
+AddOrder (Server.cpp:332-359)
+  1. Reject if the id already exists.
+  2. Reject a FillAndKill order if it can't match immediately (CanMatch).
+  3. Append the order to its price level (creating the level if needed)
+     and record its iterator in orders_.
+  4. Run MatchOrders() and return the trades.
+
+  Note the design: the incoming order is ADDED to the book first and THEN
+  matched. Many engines do the reverse: match the incoming order against
+  the opposite side first, and only rest whatever is left. Both give the
+  same result for a simple book. Match-then-rest avoids briefly putting a
+  crossed order in the book, which is why the lesson 14 design uses it.
+
+MatchOrders (Server.cpp:222-325)
+  loop:
+    if either side is empty, or best bid < best ask: stop
+    take the front order of the best bid level and of the best ask level
+    quantity = min(both remaining quantities)
+    fill both, record a Trade
+    pop any fully filled order (and remove it from orders_)
+    remove any price level that became empty
+  finally: if a FillAndKill order is left at the front of the best level,
+  cancel the rest of it
+
+WORKED EXAMPLE
+  Book:   asks: 100 -> [#2 x5]   101 -> [#1 x10]      bids: (empty)
+  New:    #3 BUY 101 x12 (GTC)
+
+  step 1: best bid 101 >= best ask 100 -> match #3 vs #2, qty 5
+          #2 filled -> removed; level 100 is empty -> removed
+  step 2: best bid 101 >= best ask 101 -> match #3 vs #1, qty 7
+          #3 filled -> removed; bids are empty -> level 101 removed
+  step 3: bids empty -> stop
+
+  Result: 2 trades (5 and 7 shares). Book: asks 101 -> [#1 x3].
+
+  At what PRICE did those trades happen? This repo's Trade stores BOTH the
+  bid's price and the ask's price (Server.cpp:261-264) and never picks
+  one. Real exchanges execute at the RESTING order's price, so trade 1
+  happens at 100, not 101. Your version should decide explicitly.
+
+CancelOrder (Server.cpp:362-386)
+  Look up the id, erase the map entry, erase the list element by its
+  stored iterator, and drop the level if it's now empty. (It still
+  contains the lesson 08 use-after-free.)
+
+
+--------------------------------------------------------------------------------
+6. EVALUATION
+--------------------------------------------------------------------------------
+
+STRENGTHS
+  + Correct choice of core data structures (sorted maps, FIFO lists, a hash
+    index with iterators for O(1) cancel).
+  + Sharding by symbol is the right instinct for scaling.
+  + The gateway is cleanly separated into manager / balancer / handlers.
+  + Process supervision (spawn, health check, kill on shutdown) is handled.
+  + One script starts the whole stack.
+
+WEAKNESSES
+  - HTTP + JSON between the gateway and engines costs far more than
+    matching. Real systems use TCP with a binary protocol, shared memory,
+    or run the engine in-process.
+  - Matching logic, networking, and JSON are all in one C++ file, so
+    there are no unit tests, and a use-after-free survived.
+  - Hand-rolled JSON parsing and unescaped JSON output.
+  - Debug output in the hot loop distorts every timing number.
+  - A global map and mutex that protect one book per process.
+  - Single trades don't spawn engines, and silently fall back to :6060.
+  - Engine spawning is serialized by a lock held during a 5-second wait.
+  - Trades never have a single execution price.
+  - The trade endpoint doesn't return the trades it produced.
+  - Nothing is persisted; a crashed engine loses its whole book.
+  - CORS allows any origin (fine locally, not for deployment).
+
+LATENCY INTUITION (orders of magnitude, not measurements)
+  one std::map lookup           tens of nanoseconds
+  matching one order            well under a microsecond (without I/O)
+  one flushed console write     microseconds
+  one localhost HTTP round trip tens to hundreds of microseconds
+  So the architecture, not the C++, decides this system's speed. Lesson 16
+  has you measure this yourself with a benchmark.
+
+
+EXERCISES
+---------
+1. Draw the architecture from memory, including the port numbers and
+   which component assigns order ids.
+
+2. Trace a CANCEL request through Go and C++, citing files and lines, the
+   way section 4 does for a trade.
+
+3. Work through this by hand: the book has bids 100 -> [#1 x10] and asks
+   102 -> [#2 x5]. A FillAndKill SELL #3 at 99 for 15 arrives. What trades
+   happen, and what's left in the book? (Check the CanMatch and FAK
+   cleanup logic.)
+
+4. Once you've installed Go: run ./start.sh, run a simulation from the
+   frontend, then call GET localhost:8000/order/engines and
+   GET localhost:8000/order/status.
+
+5. Write down three changes that would make the simulation's timing
+   number measure matching only.
+
+
+CHECKPOINT
+----------
+[ ] Which component assigns order ids?
+[ ] Why does each symbol get its own process?
+[ ] What happens to a single /order/trade for a symbol with no registered
+    engine?
+[ ] Explain price-time priority.
+[ ] Why is HTTP between the gateway and engine a bottleneck?
+
+Next: 14_your_project_layout_cmake_tests.txt

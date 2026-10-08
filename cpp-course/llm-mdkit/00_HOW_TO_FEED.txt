@@ -1,0 +1,28 @@
+================================================================================
+  HOW TO FEED THESE FILES TO AN LLM
+================================================================================
+
+Paste order for a fresh chat:
+
+  1. 04_tutor_rules.txt          always, first
+  2. 03_architecture_and_stack.txt
+  3. 05_binary_contracts.txt     whenever parsing is in scope
+  4. 01_step_by_step.txt         only the current milestone section
+  5. 02_concepts_learned.txt     the rows for that milestone
+  6. 06_review_checklist.txt     when asking for a review
+
+Then add your own message, for example:
+
+  "I am on M1. I have not written code yet. Teach the next slice only.
+   My compiler is Apple Clang. Do not write the whole decoder."
+
+Do not paste the entire cpp-course. Point the model at a lesson file
+only when a concept in 02 says to.
+
+The human course is cpp-course/00 through 17. These llm-mdkit files are
+the operating brief. Build mdkit in a NEW git repo, not inside
+TradingEngine.
+
+Learner: knows Python, learning C++20. Goal: a portfolio project that
+matches SIG Market Data Libraries & Tools (parsers, order books, CLI
+tools, C++ and Python, Linux and Windows).

@@ -1,0 +1,141 @@
+================================================================================
+  CONCEPTS  — what you learn, and from where
+================================================================================
+
+Columns: concept | you meet it | Python difference | course lesson
+Teach the lesson idea on the slice where it appears. Do not front-load.
+
+M0
+  Translation unit, -Wall, sanitizers, CMake target
+    CMakeLists + one test
+    Python has no compile/link step
+    lesson 01, 14
+
+M1
+  Fixed-width ints, unsigned wrap, enum class
+    Price4, shares, Side
+    Python ints do not wrap; "BUY" strings are not a type
+    lesson 02
+  Byte order and alignment
+    load_be / load_be48
+    struct.unpack('>I') exists; doing it wrong in C++ is UB, not an exception
+    lesson 04, 08
+  span, string_view, lifetime
+    Symbol view into the message
+    A Python str owns its data; a view does not
+    lesson 04, 12
+  Templates and concepts
+    Handler concept, decode_message<H>
+    Python duck typing is runtime
+    lesson 09
+  Error policy without exceptions
+    on_error, truncated tail
+    Python would raise
+    lesson 10
+  switch on a type tag, exhaustive lengths
+    ITCH type byte
+    no match/case on raw bytes
+    lesson 02, 12
+
+M2
+  Choosing map vs unordered_map vs vector
+    price levels vs order index vs locate table
+    Python dict hides ordering and cost
+    lesson 06
+  Iterator and reference invalidation
+    copying Live out before erase
+    dict mutation during lookup is messy; this is UB
+    lesson 07, 08
+  Aggregates and invariants
+    level shares and order count stay in sync
+    no compiler-enforced invariant in a dict
+    lesson 03
+  std::optional instead of -1
+    best bid when the book is empty
+    None
+    lesson 12
+  Header vs source, ODR, tests as spec
+    book.hpp / book.cpp / the scenario test
+    pytest, but the layout is the lesson
+    lesson 14
+
+M3
+  RAII for OS resources
+    MappedFile munmap in the destructor
+    with open() 
+    lesson 10
+  Dangling view after the owner dies
+    string_view into a mapping
+    use-after-free does not exist in Python
+    lesson 08
+  Measure before optimizing
+    mdbench, then reserve()
+    time.perf_counter, but the compiler deletes unused work
+    lesson 13, 16
+  Profiling
+    Instruments or perf, only if the number is bad
+    cProfile
+    lesson 11's "the output looked right" warning
+
+M4
+  Layered protocols
+    pcap / IP / UDP / IEX-TP / DEEP
+    you rarely parse frames in Python apps
+    new, this project
+  Little vs big endian in one program
+    load_le next to load_be
+    struct.unpack('<') vs '>'
+    lesson 02
+  Adapter / normalization
+    Event variant, two builders
+    Protocol classes; variant is closed
+    lesson 12
+  Sequence integrity
+    gap counter, process exit code
+    silent data loss
+    new, this project
+  Market-by-order vs market-by-price
+    orders_ map exists only for ITCH
+    same word "book", different identity
+    lesson 06, 17
+
+M5
+  FFI, pybind11, who owns the memory
+    iterator over C++ events
+    ctypes/cffi; here you define the boundary
+    lesson 15 (bindings only)
+  GIL and data races
+    gil_scoped_release around decode
+    Python threads do not truly parallelize CPU
+    lesson 11
+
+M6
+  Sockets, multicast, two-thread queue
+    mdlisten / mdreplay
+    asyncio sockets; no shared-memory races
+    lesson 11
+  Fuzzing as a test
+    libFuzzer + ASan
+    Hypothesis, but ASan is the point
+    lesson 08
+  REST at the edge
+    mdsnap
+    FastAPI; here the server is not the product
+    lesson 12, 15
+
+CONCEPTS THE OLD TRADINGENGINE REPO TAUGHT THAT YOU STILL USE
+  Price-time book structure (map of levels) — lesson 06, 13, 14b
+  The cancel use-after-free — lesson 08. Same bug if Replace erases
+  the map node and then reads it.
+
+CONCEPTS TO NOT SPEND TIME ON FOR THIS PROJECT
+  Go goroutines, chi, Next.js, httplib as the architecture,
+  shared_ptr ownership graphs, matching-engine FillAndKill.
+  Those are lessons 13 and 15. Skim them so you can say why mdkit
+  is different.
+
+INTERVIEW SENTENCE (student should be able to say this after M5)
+  "C++20 library, memory-mapped ITCH, visitor decoder, order-id
+   index plus price books, second adapter for IEX DEEP inside pcap,
+   CLI tools for dump/stats/book, sanitizers, fuzz, Python iterator
+   so research does not copy the hot path."

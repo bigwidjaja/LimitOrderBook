@@ -1,0 +1,123 @@
+================================================================================
+  BINARY CONTRACTS  — do not invent offsets
+================================================================================
+
+If a message is not in this file, stop and read the official PDF.
+Lengths below are the message size AFTER the 2-byte frame length.
+They were checked against a hand-built ITCH stream that decoded and
+built a book (adds, exec, cancel, replace, unknown delete).
+
+ENDIAN
+  ITCH multi-byte integers: big-endian.
+  IEX multi-byte integers: little-endian.
+  Hosts here (x86, Apple Silicon) are little-endian.
+
+  template <typename T>
+  T load_be(const std::byte* p) {
+      T value = 0;
+      for (std::size_t i = 0; i < sizeof(T); ++i)
+          value = static_cast<T>((value << 8) |
+              std::to_integer<std::uint8_t>(p[i]));
+      return value;
+  }
+
+  6-byte ITCH timestamp: load_be48, same loop, 6 iterations.
+  At -O2 the 4- and 8-byte loops become a single byte-swap (rev/bswap).
+  Write the loop. Do not memcpy into a uint32_t and hope.
+
+  Prices: uint32, 4 implied decimals. 1500000 prints as 150.0000.
+  Zero-pad the fraction. 1500060 is 150.0060, not 150.60.
+  Symbols: 8 bytes, space-padded. View is trimmed, not a std::string
+  allocated per message.
+
+ITCH FRAMING
+  uint16 BE length, then `length` bytes of message.
+  First message byte is the type character.
+  If fewer than `length` bytes remain, stop. That tail is not an error
+  by itself (partial read). A length that does not match the spec size
+  for that type is DecodeError::BadLength. Unknown type is
+  DecodeError::UnknownType. Do not throw.
+
+ITCH HEADER (bytes 0..10 of every message below)
+  0      type            1
+  1      stock locate    uint16 BE
+  3      tracking number uint16 BE
+  5      timestamp       uint48 BE nanoseconds since midnight
+
+VERIFIED MESSAGE BODIES (offsets from start of message, not from length)
+
+  'A' Add Order                         total 36
+      11 order reference  uint64
+      19 side             'B' or 'S'
+      20 shares           uint32
+      24 stock            8 chars
+      32 price            uint32 Price4
+
+  'E' Order Executed                    total 31
+      11 order reference  uint64
+      19 executed shares  uint32
+      23 match number     uint64
+
+  'X' Order Cancel                      total 23
+      11 order reference  uint64
+      19 cancelled shares uint32
+
+  'D' Order Delete                      total 19
+      11 order reference  uint64
+
+  'U' Order Replace                     total 35
+      11 original ref     uint64
+      19 new ref          uint64
+      27 shares           uint32
+      31 price            uint32
+      Side is NOT in the message. Copy side from the live order
+      you are replacing. If original ref is unknown, count it and
+      do not insert the new order.
+
+NOT VERIFIED HERE — read the PDF before coding
+  'F' Add Order with MPID, 'C' Order Executed With Price,
+  'P' Trade (non-cross), 'Q' Cross Trade, 'R' Stock Directory,
+  'S' System Event, 'H' Stock Trading Action, and the rest.
+  You need 'R' before mdbook --symbol, because locate is an integer
+  and the symbol lives in the directory message. Take its length
+  and field offsets from the PDF, then add a round-trip test.
+
+BOOK RULES (ITCH)
+  Add:     insert Live{locate, side, price, shares}; add to that book.
+  Exec/X:  subtract shares; if remaining hits 0, erase the order and
+           decrement the level's order count; erase the level at 0 orders.
+  Delete:  subtract whatever shares remain.
+  Replace: remove old ref entirely, add new ref at the new price/size,
+           same side, same locate.
+  Unknown ref: ++counter, do not throw, do not underflow.
+  Execute more than remaining: clamp, count it, do not wrap uint32.
+
+IEX-TP v1 HEADER (40 bytes, little-endian). Offsets from public
+implementations of the IEX transport spec (polygon-iex-deep / iex_protocols).
+Re-check the PDF before M4.
+
+  0   version            u8   (1)
+  1   reserved           u8
+  2   message protocol   u16  DEEP is 0x8004, DEEP+ 0x8005, TOPS 1.6 0x8003
+  4   channel id         u32
+  8   session id         u32
+  12  payload length     u16  DOES NOT include this 40-byte header
+  14  message count      u16
+  16  stream offset      i64
+  24  first message seq  i64
+  32  send time          i64  nanoseconds
+
+  Payload: `message count` messages. Each is uint16 LE length, then
+  that many bytes starting with a type byte.
+  Sequence gap: next first-seq != previous first-seq + previous count
+  (except session start). mdstat exits 1 when gaps > 0.
+
+  DEEP message layouts: ONLY from the DEEP spec version named in the
+  pcap filename. Do not reuse ITCH offsets. DEEP is aggregated:
+  a price-level update carries side, price, and size. No order ref.
+  There is no ITCH-style orders_ map on the IEX path.
+
+PCAP
+  HIST files are gzip pcap or pcapng. Gunzip first or stream-inflate.
+  Then Ethernet / IPv4 / UDP payload is the IEX-TP segment.
+  Ignore non-UDP packets. Do not depend on libpcap unless you must.

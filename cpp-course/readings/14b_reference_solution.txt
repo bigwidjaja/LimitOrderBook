@@ -1,0 +1,271 @@
+================================================================================
+  LESSON 14b — REFERENCE SOLUTION: THE ORDER BOOK LIBRARY
+  Part 4: Systems and Your Own Project  |  read AFTER attempting milestone 1
+================================================================================
+
+SPOILER WARNING
+---------------
+This is a complete implementation of the lesson 14 design. You'll learn far
+more by building your own first (lesson 16, milestone 1) and then comparing
+it with this. When you compare, focus on the "WHY" notes after the code.
+
+STATUS
+------
+While writing this course, this exact code was compiled with
+    clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror
+with zero warnings, and it passed a test program covering: resting,
+multi-level sweeps, resting-price execution, FIFO, partial fills,
+FillAndKill rejection and remainder discard, cancel (found, not found,
+twice, last order at a level), zero-quantity rejection, and duplicate-id
+rejection. It also passed with MallocScribble=1 (freed-memory detection).
+
+Files:
+    include/orderbook/types.hpp
+    include/orderbook/order.hpp
+    include/orderbook/orderbook.hpp
+    src/orderbook.cpp
+
+
+================================================================================
+include/orderbook/types.hpp
+================================================================================
+
+#pragma once
+
+#include <cstdint>
+
+using Price = std::int32_t;
+using Quantity = std::uint32_t;
+using OrderId = std::uint64_t;
+
+enum class Side { Buy, Sell };
+enum class OrderType { GoodTillCancel, FillAndKill };
+
+
+================================================================================
+include/orderbook/order.hpp
+================================================================================
+
+#pragma once
+
+#include "orderbook/types.hpp"
+
+struct Order {
+    OrderId id;
+    Side side;
+    OrderType type;
+    Price price;
+    Quantity remaining;
+};
+
+struct Trade {
+    OrderId buyId;
+    OrderId sellId;
+    Price price;
+    Quantity quantity;
+};
+
+
+================================================================================
+include/orderbook/orderbook.hpp
+================================================================================
+
+#pragma once
+
+#include "orderbook/order.hpp"
+
+#include <cstddef>
+#include <functional>
+#include <list>
+#include <map>
+#include <optional>
+#include <unordered_map>
+#include <vector>
+
+class Orderbook {
+public:
+    [[nodiscard]] std::vector<Trade> add(Order order);
+    bool cancel(OrderId id);
+    std::optional<Price> bestBid() const;
+    std::optional<Price> bestAsk() const;
+    std::size_t size() const { return index_.size(); }
+
+private:
+    using Level = std::list<Order>;
+
+    std::map<Price, Level, std::greater<Price>> bids_;
+    std::map<Price, Level, std::less<Price>> asks_;
+    std::unordered_map<OrderId, Level::iterator> index_;
+
+    template <typename Book>
+    void matchAgainst(Order& incoming, Book& opposite, std::vector<Trade>& trades);
+
+    template <typename Book>
+    void eraseFrom(Book& book, Level::iterator it);
+};
+
+
+================================================================================
+src/orderbook.cpp
+================================================================================
+
+#include "orderbook/orderbook.hpp"
+
+#include <algorithm>
+
+template <typename Book>
+void Orderbook::matchAgainst(Order& incoming, Book& opposite, std::vector<Trade>& trades) {
+    auto crosses = [&](Price restingPrice) {
+        return incoming.side == Side::Buy ? incoming.price >= restingPrice
+                                          : incoming.price <= restingPrice;
+    };
+
+    while (incoming.remaining > 0 && !opposite.empty()) {
+        auto levelIt = opposite.begin();
+        if (!crosses(levelIt->first)) break;
+
+        Level& level = levelIt->second;
+        while (incoming.remaining > 0 && !level.empty()) {
+            Order& resting = level.front();
+            Quantity q = std::min(incoming.remaining, resting.remaining);
+            incoming.remaining -= q;
+            resting.remaining -= q;
+
+            bool incomingIsBuy = incoming.side == Side::Buy;
+            trades.push_back({incomingIsBuy ? incoming.id : resting.id,
+                              incomingIsBuy ? resting.id : incoming.id,
+                              resting.price, q});
+
+            if (resting.remaining == 0) {
+                index_.erase(resting.id);
+                level.pop_front();
+            }
+        }
+        if (level.empty()) opposite.erase(levelIt);
+    }
+}
+
+template <typename Book>
+void Orderbook::eraseFrom(Book& book, Level::iterator it) {
+    auto levelIt = book.find(it->price);
+    levelIt->second.erase(it);
+    if (levelIt->second.empty()) book.erase(levelIt);
+}
+
+std::vector<Trade> Orderbook::add(Order order) {
+    std::vector<Trade> trades;
+    if (order.remaining == 0 || index_.contains(order.id)) return trades;
+
+    if (order.side == Side::Buy) matchAgainst(order, asks_, trades);
+    else                         matchAgainst(order, bids_, trades);
+
+    if (order.remaining > 0 && order.type == OrderType::GoodTillCancel) {
+        Level& level = order.side == Side::Buy ? bids_[order.price] : asks_[order.price];
+        level.push_back(order);
+        index_[order.id] = std::prev(level.end());
+    }
+    return trades;
+}
+
+bool Orderbook::cancel(OrderId id) {
+    auto found = index_.find(id);
+    if (found == index_.end()) return false;
+
+    Level::iterator it = found->second;
+    index_.erase(found);
+
+    if (it->side == Side::Buy) eraseFrom(bids_, it);
+    else                       eraseFrom(asks_, it);
+    return true;
+}
+
+std::optional<Price> Orderbook::bestBid() const {
+    if (bids_.empty()) return std::nullopt;
+    return bids_.begin()->first;
+}
+
+std::optional<Price> Orderbook::bestAsk() const {
+    if (asks_.empty()) return std::nullopt;
+    return asks_.begin()->first;
+}
+
+
+================================================================================
+WHY IT'S WRITTEN THIS WAY (compare with your version)
+================================================================================
+
+1. std::list<Order> OWNS each order, by value (lesson 05)
+   No shared_ptr, no separate heap allocation for a control block, no
+   atomic reference counting. Destroying the list element destroys the
+   order.
+
+2. index_ stores ONLY an iterator (lessons 06-07)
+   The iterator gives O(1) access to the order itself (it->side,
+   it->price) AND O(1) removal from its list. std::list guarantees the
+   iterator stays valid while other orders come and go.
+
+3. Order of operations in matchAgainst (lesson 08)
+       index_.erase(resting.id);   // reads resting.id while resting is alive
+       level.pop_front();          // THEN destroys resting
+   Swap these two lines and you've recreated this repo's original
+   use-after-free. The trade is also recorded BEFORE anything is erased.
+
+4. Order of operations in cancel (lesson 08)
+       Level::iterator it = found->second;   // COPY the iterator out
+       index_.erase(found);                  // destroys the map entry
+       ... it->side ...                      // safe: 'it' is our own copy,
+                                             // and the Order it points to
+                                             // lives in the list, not the map
+   This is precisely the fix for the repo's CancelOrder bug.
+
+5. One template for both sides (lesson 09)
+   bids_ and asks_ are DIFFERENT types (their comparators differ), so a
+   normal function can't accept both. A member function template can.
+   It's defined in the .cpp because it's private and only used there. The
+   compiler instantiates it for both map types inside this one file.
+
+6. Match first, then rest (lesson 13)
+   The incoming order only enters the book if something is left over AND
+   it's GoodTillCancel. FillAndKill never rests, so no cleanup pass is
+   needed afterwards. A FillAndKill that can't match produces zero trades
+   and simply isn't added.
+
+7. Trades execute at the RESTING price (lesson 13)
+   trade.price = resting.price. The buyer and seller ids are resolved
+   explicitly, whichever side the incoming order is on.
+
+8. bids_[order.price] uses operator[] ON PURPOSE (lesson 06)
+   Inserting a new, empty price level is exactly what we want here. In
+   every lookup-only situation (eraseFrom), we use find().
+
+9. One ternary picks a level from either map
+       Level& level = order.side == Side::Buy ? bids_[...] : asks_[...];
+   The two maps are different types, but both branches return a Level&
+   (the map VALUE type is the same), so the ternary is valid.
+
+10. [[nodiscard]] on add (lesson 12)
+    Callers who ignore the trades get a compiler warning.
+
+11. No I/O, no globals, no exceptions in the hot path (lessons 10-12, 14)
+    Invalid input (zero quantity, duplicate id) returns an empty trade list
+    and doesn't rest.
+
+
+================================================================================
+KNOWN LIMITATIONS (good next steps)
+================================================================================
+
+  - Callers can't tell "rejected" apart from "accepted, no trades".
+    Return a struct { Status status; std::vector<Trade> trades; }.
+  - No modify-order operation. (Cancel + add loses time priority. Is that
+    the behavior you want? Real exchanges usually keep priority when
+    quantity goes DOWN and lose it otherwise.)
+  - No level snapshot (price -> total quantity) for a /status endpoint.
+  - No market orders or other order types.
+  - Not thread-safe. That's intentional: use the single-writer design from
+    lesson 11 in the server layer.
+  - std::list does one heap allocation per order. A faster version uses a
+    memory pool or an intrusive list. That's an advanced optimization, so
+    measure first (lesson 16, milestone 3).
+
+Next: 15_replacing_go.txt
