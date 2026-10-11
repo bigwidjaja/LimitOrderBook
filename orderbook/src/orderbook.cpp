@@ -1,33 +1,69 @@
 #include "orderbook/orderbook.hpp"
 
+#include <algorithm>
 #include <iterator>
 #include <utility>
 
-/*
- add
-    Reject a duplicate id: return an empty vector and do not insert.
-    Reject quantity 0 the same way.
-    Otherwise append the order to the back of its price level
-    (create the level if needed) and store the list iterator in index_.
-    Return an empty trade vector.
-*/
-
 std::vector<Trade> Orderbook::add(Order order) {
-    if (order.remaining == 0 || index_.contains(order.id)) { //.remaining is from the object order. index_. is a call to the map in the Orderbook.hpp
+    // Reject an order that wants to trade 0 units or if the id already exists.
+    if (order.remaining == 0 || index_.contains(order.id)) {
         return {};
     }
 
-    if (order.side == Side::Buy) { // we make it enum Side::Buy cuz itd be bad if it were a string, it has to be one or the other
-        Level& level = bids_[order.price]; // we create an item of type reference to a level which is our bids_ (a map) which have our current prices
-        level.push_back(std::move(order)); // appends the order to the back
-        index_[level.back().id] = std::prev(level.end()); //level.back() is the order we just added. were setting its index to the position of the last order
-    } else { //we use std::prev cuz end goes to the very end, and we gotta step back by one. VISUAL: [ id 1 | id 2 | id 5 ] end() <- 
+    std::vector<Trade> trades;
+    const bool isBuy = order.side == Side::Buy;
 
-        Level& level = asks_[order.price];
-        level.push_back(std::move(order));
-        index_[level.back().id] = std::prev(level.end());
+    // Match the best opposite price first, and the oldest order at that price. (price priority > time priority)
+    auto matchAgainst = [&](auto& levels) { // the [&] is a lambda that lets us manipulate the variables IN the add function (uses auto since asks_ and bids_ can be diff types).
+    //  extra note: auto on the left means it takes the type  from the right
+        while (order.remaining > 0 && !levels.empty()) {
+            const Price best = levels.begin()->first;
+            if (isBuy ? order.price < best : order.price > best) { // if isBuy is true, use the left side of the colon
+                break;
+            }
+
+            Level& level = levels.begin()->second; // levels refers to either asks_ or bids_ depending on which map we matched to
+           // also, don't forget ->first is the price of the asks_ or bids_ map, while ->second is the list of orders at that price.
+            Order& resting = level.front(); // resting is the order already in the book we trade against
+            const Quantity quantity = std::min(order.remaining, resting.remaining);
+            const Price tradePrice = resting.price;
+            const OrderId restingId = resting.id;
+
+            order.remaining -= quantity;
+            resting.remaining -= quantity;
+            // When incoming is buy, its id is the buyer and restingID is the seller. When incoming is a sell, restingId is the buyer and incoming id is the seller.
+            if (isBuy) {
+                trades.push_back(Trade{order.id, restingId, tradePrice, quantity});
+            } else {
+                trades.push_back(Trade{restingId, order.id, tradePrice, quantity});
+            }
+
+            // Destroy the node if we took the last units of resting
+            if (resting.remaining == 0) {
+                cancel(restingId);
+            }
+        }
+    };
+
+    if (isBuy) {
+        matchAgainst(asks_);
+    } else {
+        matchAgainst(bids_);
     }
-    return {};
+
+    if (order.type == OrderType::GoodTillCancel && order.remaining > 0) {
+        if (isBuy) {
+            Level& level = bids_[order.price];
+            level.push_back(std::move(order));
+            index_[level.back().id] = std::prev(level.end());
+        } else {
+            Level& level = asks_[order.price];
+            level.push_back(std::move(order));
+            index_[level.back().id] = std::prev(level.end());
+        }
+    }
+
+    return trades;
 }
 
 /* 
