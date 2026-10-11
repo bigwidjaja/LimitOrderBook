@@ -130,3 +130,59 @@ std::optional<Price> Orderbook::bestAsk() const {
 std::size_t Orderbook::size() const {
     return index_.size();
 }
+
+std::size_t Orderbook::bidCount() const {
+    std::size_t count = 0;
+    for (const auto& entry : bids_) { // for entries in bids
+        count += entry.second.size();
+    }
+    return count;
+}
+
+std::size_t Orderbook::askCount() const {
+    std::size_t count = 0;
+    for (const auto& entry : asks_) {
+        count += entry.second.size();
+    }
+    return count;
+}
+
+std::size_t Orderbook::bidLevels() const {
+    return bids_.size();
+}
+
+std::size_t Orderbook::askLevels() const {
+    return asks_.size();
+}
+
+namespace {
+
+template <class Levels>
+std::vector<LevelSummary> summarize(const Levels& levels) {
+    std::vector<LevelSummary> out;
+    out.reserve(levels.size());
+    for (const auto& entry : levels) {
+        Quantity quantity = 0;
+        for (const Order& order : entry.second) {
+            quantity += order.remaining;
+        }
+        out.push_back(LevelSummary{entry.first, quantity});
+    }
+    return out;
+}
+
+}  // namespace
+
+std::vector<LevelSummary> Orderbook::bidDepth() const {
+    return summarize(bids_);
+}
+
+std::vector<LevelSummary> Orderbook::askDepth() const {
+    return summarize(asks_);
+}
+
+void Orderbook::clear() {
+    bids_.clear();
+    asks_.clear();
+    index_.clear();
+}

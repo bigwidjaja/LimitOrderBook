@@ -202,6 +202,56 @@ TEST_CASE("FillAndKill that fully fills leaves nothing behind") {
     CHECK_FALSE(book.bestAsk().has_value());
 }
 
+TEST_CASE("bid and ask counts follow adds and cancels") {
+    Orderbook book;
+    REQUIRE(book.add({1, Side::Buy, OrderType::GoodTillCancel, 100, 10}).empty());
+    REQUIRE(book.add({2, Side::Sell, OrderType::GoodTillCancel, 105, 10}).empty());
+    CHECK(book.bidCount() == 1);
+    CHECK(book.askCount() == 1);
+    CHECK(book.size() == 2);
+    CHECK(book.bidLevels() == 1);
+    CHECK(book.askLevels() == 1);
+
+    REQUIRE(book.cancel(1));
+    CHECK(book.bidCount() == 0);
+    CHECK(book.bidLevels() == 0);
+    CHECK(book.askCount() == 1);
+    CHECK(book.size() == 1);
+}
+
+TEST_CASE("two orders at one price are one level") {
+    Orderbook book;
+    REQUIRE(book.add({1, Side::Buy, OrderType::GoodTillCancel, 100, 10}).empty());
+    REQUIRE(book.add({2, Side::Buy, OrderType::GoodTillCancel, 100, 5}).empty());
+    CHECK(book.bidCount() == 2);
+    CHECK(book.bidLevels() == 1);
+    CHECK(book.askCount() == 0);
+    CHECK(book.askLevels() == 0);
+}
+
+TEST_CASE("depth sums quantity at each price and clear empties the book") {
+    Orderbook book;
+    REQUIRE(book.add({1, Side::Buy, OrderType::GoodTillCancel, 100, 10}).empty());
+    REQUIRE(book.add({2, Side::Buy, OrderType::GoodTillCancel, 100, 4}).empty());
+    REQUIRE(book.add({3, Side::Buy, OrderType::GoodTillCancel, 99, 3}).empty());
+    REQUIRE(book.add({4, Side::Sell, OrderType::GoodTillCancel, 105, 7}).empty());
+
+    const auto bids = book.bidDepth();
+    REQUIRE(bids.size() == 2);
+    CHECK(bids[0].price == 100);
+    CHECK(bids[0].quantity == 14);
+    CHECK(bids[1].price == 99);
+    CHECK(bids[1].quantity == 3);
+    REQUIRE(book.askDepth().size() == 1);
+    CHECK(book.askDepth()[0].price == 105);
+    CHECK(book.askDepth()[0].quantity == 7);
+
+    book.clear();
+    CHECK(book.size() == 0);
+    CHECK(book.bidLevels() == 0);
+    CHECK(book.askLevels() == 0);
+}
+
 TEST_CASE("a sell hits the best bid and trades at the bid") {
     Orderbook book;
     REQUIRE(book.add({1, Side::Buy, OrderType::GoodTillCancel, 100, 4}).empty());
