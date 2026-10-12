@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+// Quantity at one price. The list behind it is private to Orderbook.
 struct LevelSummary {
     Price price;
     Quantity quantity;
@@ -33,7 +34,9 @@ public:
 private:
     using Level = std::list<Order>;
 
-    std::map<Price, Level, std::greater<Price>> bids_; // syntax for map: <key, value, sort order> 
+    // begin() is the best price: highest bid, lowest ask.
+    std::map<Price, Level, std::greater<Price>> bids_;
     std::map<Price, Level, std::less<Price>> asks_;
-    std::unordered_map<OrderId, Level::iterator> index_; // Level::iterator is a bookmark into either asks or bids
-}; // unordered map is a hashtable lol
+    // Points at the list node that owns the order. Cancel uses it instead of scanning.
+    std::unordered_map<OrderId, Level::iterator> index_;
+};
