@@ -227,6 +227,112 @@ Tests with pytest and a real engine_server on a free port:
   "priceMin > priceMax is rejected"
   "trade then cancel against a spawned engine"
 
+TO DO: 
+
+1. Create the Python project. Add gateway/ with a FastAPI app and dependencies: FastAPI, uvicorn, httpx, and pytest. The engine binary comes from the environment variable ENGINE_PATH. If that is unset, use orderbook/build/engine_server.
+
+   What it does: gateway/requirements.txt names the packages. gateway/app.py
+   finds the C++ binary from the repo root, unless ENGINE_PATH is set.
+
+     REPO_ROOT = Path(__file__).resolve().parent.parent
+     DEFAULT_ENGINE_PATH = REPO_ROOT / "orderbook" / "build" / "engine_server"
+
+     def engine_path() -> Path:
+         configured = os.environ.get("ENGINE_PATH")
+         if configured:
+             return Path(configured)
+         return DEFAULT_ENGINE_PATH
+
+2. Start the app on port 8000. Allow the website origin http://localhost:3000 in CORS, so the Next.js page can call this port later. On shutdown, kill every engine_server process this app started.
+
+   What it does: uvicorn listens on 8000. CORSMiddleware lets the page on
+   port 3000 read replies. lifespan kills every process in engine_processes
+   after yield, which is when the app stops.
+
+     app = FastAPI(lifespan=lifespan)
+     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000"], ...)
+     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+     for proc in engine_processes:
+         if proc.returncode is None:
+             proc.kill()
+
+3. Keep a table of running engines. Map each symbol to a port, starting at 6060. Starting AAPL launches engine_server 6060 and polls GET /status until it returns 200 or the wait runs out. A second request for AAPL must wait on that same startup, not launch another process. AAPL and GOOG start at the same time.
+
+   What it does: symbol_ports is symbol -> port. engine_tasks is symbol ->
+   the startup already running. engine_url checks that table before it
+   starts anything. create_task lets the next symbol start without waiting.
+
+     next_port = itertools.count(6060)
+     task = engine_tasks.get(symbol)
+     if task is None:
+         port = next(next_port)
+         symbol_ports[symbol] = port
+         task = engine_tasks[symbol] = asyncio.create_task(spawn(symbol, port))
+     return await task
+
+   spawn runs engine_server <port> and polls GET /status for about 5 seconds.
+
+4. Add one HTTP client that the gateway uses to call those engines. The gateway speaks to http://127.0.0.1:6060, not to the order book directly.
+
+   What it does: one httpx client is created at startup and closed at
+   shutdown. Every later call to an engine goes through http().
+
+     engine_client = httpx.AsyncClient(timeout=10)
+     response = await http().get(f"http://127.0.0.1:{port}/status")
+
+5. Implement POST /order/simulation. This is the main route. It follows Simulation.go:
+
+Reject an empty stock list, a blank symbol, priceMin > priceMax, or quantityMin > quantityMax.
+Start one engine per symbol.
+POST /reset on each engine so the run starts from an empty book.
+Build random good-till-cancel orders. The gateway assigns ids, starting at 1. For each symbol, emit all the bids first, then all the asks.
+Start a clock. POST /batch to every engine at once. Stop the clock. That duration is executionTimeMs. Do not include the time spent starting the processes.
+Return executionTimeMs, totalOrdersProcessed, and one result per symbol. Each result has the batch fields the engine already returns: trades, volume, bids left, asks left, best prices, and level counts. A missing price stays JSON null.
+
+   What it does: validate_simulation raises 400. asyncio.gather starts
+   every symbol together, then resets those books. make_orders writes
+   BUY orders before SELL orders, with ids from itertools.count(1).
+   The clock wraps only the /batch posts. stock_result copies the engine
+   fields and leaves a missing price as null.
+
+     urls = await asyncio.gather(*(engine_url(stock.symbol) for stock in request.stocks))
+     started = time.perf_counter()
+     batches = await asyncio.gather(*(post_batch(url, orders) for symbol, url in jobs))
+     elapsed_ms = (time.perf_counter() - started) * 1000
+
+6. Implement POST /order/trade and POST /order/cancel. The website sends JSON. The engine expects form fields. The gateway assigns the order id for a trade, converts the JSON into orderid, tradetype, side, price, quantity, and book, and posts that form to the engine. book is the symbol, which the Go code calls name. Cancel sends orderid and book. If that symbol has no engine yet, start one. Do not send an unknown symbol to port 6060.
+
+   What it does: TradeRequest reads name, not book. engine_url starts the
+   symbol if needed. forward_form posts form fields, not JSON. A successful
+   trade reply adds orderid so the caller can cancel that order.
+
+     url = await engine_url(request.name)
+     await forward_form(url, "/trade", {"orderid": str(order_id), "book": request.name, ...})
+     await forward_form(url, "/cancel", {"orderid": str(request.orderID), "book": request.name})
+
+7. Implement the four read-and-admin routes.
+
+POST /order/reset clears every running engine.
+GET /order/status asks every engine for /status and combines the answers.
+GET /order/health lists each engine’s symbol, port, URL, and whether /status returned 200.
+GET /order/engines lists the symbol-to-port map.
+
+   What it does: reset posts /reset to each known port and adds up
+   booksCleared. status returns {symbol: that engine's JSON}. health
+   sets status to healthy, degraded, or unhealthy from those /status
+   checks. engines returns count, mapping, and the same rows.
+
+     return {"count": len(symbol_ports), "mapping": dict(symbol_ports), "engines": rows}
+
+8. Test it with pytest against a real engine_server. Cover one symbol, two symbols on two ports, a second simulation reusing the same process, a rejected priceMin > priceMax, and a trade followed by a cancel. Then curl /order/simulation for one stock and confirm the reply has executionTimeMs and one result. After the app stops, no engine_server processes should still be running.
+
+   What it does: gateway/test_gateway.py uses TestClient, which starts the
+   app, runs the request, and then runs shutdown so the engines are killed.
+   Five tests, one per case above. pytest passed. A curl of one TSLA
+   simulation returned executionTimeMs and one result. Stopping uvicorn
+   left no engine_server process.
+
 Turn in:
   [ ] pytest passes
   [ ] curl to /order/simulation with one stock returns executionTimeMs
@@ -280,3 +386,45 @@ TradingEngine workflow. Optional later work, not part of this file:
 a manual trade form, depth beyond the summary counts, and the binary
 protocol from lesson 15 option C.
 ================================================================================
+
+
+================================================================================
+How it works / Notes: 
+================================================================================
+
+Four Moving Parts
+
+  The order book library is the matching notebook. add, cancel, and the price counts live here. It has no ports and no JSON. Nothing else is allowed to reach into its maps. Everyone else calls those functions.
+
+  engine_server is one running copy of that notebook with an HTTP window. One process, one book, one port such as 6060. It turns /trade, /cancel, /batch, /reset, and /status into calls on the library and sends JSON back. It does not know about the website, and it does not decide which stock it is. The gateway makes that decision by which port it calls.
+
+  The FastAPI gateway is the front door, on port 8000. It is the only address the website uses. It keeps a table of symbol to port. A simulation of AAPL and GOOG makes it start two engine_server processes, invent the random orders, give them ids, reset each book, and POST /batch to each port at the same time. Then it stitches the two JSON replies into one response. A single trade goes to the one engine for that symbol, starting it first if needed. On shutdown it kills those engine processes.
+
+  The Next.js website is the form and the results table, on port 3000. It sends the simulation JSON to port 8000 and draws whatever comes back. It never learns an engine port.
+
+
+Step by Step 
+
+  -> You fill out a form in the website.
+
+  -> The website sends that form to the gateway.
+
+  -> The gateway starts one engine for each stock.
+
+  -> Each engine listens on its own port and holds one order book.
+
+  -> The gateway remembers which port belongs to which stock.
+
+  -> The gateway creates the random orders and gives each order an id.
+
+  -> The gateway sends AAPL's orders to AAPL's port, and GOOG's orders to GOOG's port.
+
+  -> The engine receives those orders and calls the library.
+
+  -> The library matches the orders and updates that engine's book.
+
+  -> The engine turns the results into JSON and sends them back to the gateway.
+
+  -> The gateway combines every stock's JSON into one reply.
+
+  -> The website shows that reply.

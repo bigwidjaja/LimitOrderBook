@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #090b10;
+  --color-panel: #12161d;
+  --color-panel-2: #1a2029;
+  --color-line: #2c3442;
+  --color-ink: #e8edf5;
+  --color-muted: #8e99ab;
+  --color-bid: #3ecf8e;
+  --color-ask: #ff6b6b;
+  --color-accent: #f0c14b;
+  --font-sans: var(--font-dm), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex), ui-monospace, monospace;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+input,
+button {
+  font: inherit;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  margin: 0;
+}
